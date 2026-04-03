@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { generateDescription } from './genai'
+import { generateDescription, generateSpectrumPrompts } from './genai'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -655,30 +655,34 @@ export default function App() {
     setGeneratingSpectrumIdx(generatingIdx)
 
     const anchorNode = nodes[spectrum.anchorId]
-    const timers = allIds.map((id, i) => {
-      return setTimeout(() => {
-        setNodes(prev => {
-          if (!prev[id]) return prev
-          const total = allIds.length
-          return {
-            ...prev,
-            [id]: {
-              ...prev[id],
-              loading: false,
-              image: i === total - 1 ? anchorNode?.image : null,
-              color: i === total - 1 ? null : mockColor(i, total),
-            },
+    const description = anchorNode?.prompt || ''
+
+    generateSpectrumPrompts(description, value, allIds.length).then(prompts => {
+      setNodes(prev => {
+        const next = { ...prev }
+        allIds.forEach((id, i) => {
+          if (!next[id]) return
+          next[id] = {
+            ...next[id],
+            loading: false,
+            prompt: prompts[i] || null,
+            color: mockColor(i, allIds.length),
           }
         })
-        setGenerationTimers(prev => {
-          const next = prev.filter(t => t !== timers[i])
-          if (next.length === 0) setGeneratingSpectrumIdx(null)
-          return next
+        return next
+      })
+      setGeneratingSpectrumIdx(null)
+    }).catch(() => {
+      // On error, stop loading state
+      setNodes(prev => {
+        const next = { ...prev }
+        allIds.forEach(id => {
+          if (next[id]) next[id] = { ...next[id], loading: false }
         })
-      }, 800 + i * 600)
+        return next
+      })
+      setGeneratingSpectrumIdx(null)
     })
-
-    setGenerationTimers(prev => [...prev, ...timers])
   }, [inputFor, spectrums, nodes])
 
   // ── Canvas pan (mouse down on empty space) ───────────────────────────────
