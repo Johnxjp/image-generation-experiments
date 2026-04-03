@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { generateDescription, generateSpectrumPrompts } from './genai'
+import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateImage } from './genai'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -206,8 +206,18 @@ function PlusButton({ node, onDragStart }) {
 // ── Prompt side panel ────────────────────────────────────────────────────────
 
 function PromptPanel({ node, onClose }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = () => {
+    if (!node?.prompt) return
+    navigator.clipboard.writeText(node.prompt).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+
   return (
-    <div style={{
+    <div data-prompt-panel style={{
       position: 'fixed', top: 0, right: 0, bottom: 0, width: 340,
       background: 'var(--card-bg)', borderLeft: '1px solid var(--card-border)',
       zIndex: 200, display: 'flex', flexDirection: 'column',
@@ -223,18 +233,45 @@ function PromptPanel({ node, onClose }) {
         }}>
           Image Prompt
         </span>
-        <div
-          onClick={onClose}
-          style={{
-            width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: 'var(--text-dim)', fontSize: 16, lineHeight: 1,
-            transition: 'background 0.15s',
-          }}
-          onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-        >
-          &times;
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          {node?.prompt && !node.promptLoading && (
+            <div
+              onClick={handleCopy}
+              style={{
+                width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: copied ? 'var(--accent)' : 'var(--text-dim)',
+                transition: 'background 0.15s, color 0.15s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              title="Copy to clipboard"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                {copied ? (
+                  <path d="M3 7.5L5.5 10L11 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                ) : (
+                  <>
+                    <rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                    <path d="M10 4V2.5A1.5 1.5 0 008.5 1H2.5A1.5 1.5 0 001 2.5v6A1.5 1.5 0 002.5 10H4" stroke="currentColor" strokeWidth="1.3" />
+                  </>
+                )}
+              </svg>
+            </div>
+          )}
+          <div
+            onClick={onClose}
+            style={{
+              width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--text-dim)', fontSize: 16, lineHeight: 1,
+              transition: 'background 0.15s',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
+            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+          >
+            &times;
+          </div>
         </div>
       </div>
       <div style={{ padding: 20, flex: 1, overflowY: 'auto' }}>
@@ -255,6 +292,7 @@ function PromptPanel({ node, onClose }) {
           <p style={{
             fontFamily: 'var(--mono)', fontSize: 13, lineHeight: 1.7,
             color: 'var(--text)', margin: 0, whiteSpace: 'pre-wrap',
+            userSelect: 'text', cursor: 'text',
           }}>
             {node.prompt}
           </p>
@@ -325,14 +363,21 @@ export default function App() {
     const { src, w, h } = await readImageFile(file)
     const canvasPos = screenToCanvas(e.clientX, e.clientY, pan, zoom)
     const id = uid()
+    console.log('[image uploaded]', id)
 
     setNodes(prev => ({
       ...prev,
       [id]: { id, pos: canvasPos, image: src, naturalW: w, naturalH: h, type: 'anchor', prompt: null, promptLoading: true },
     }))
 
+    console.log('[prompt requested]', id)
     generateDescription(src).then(desc => {
+      console.log('[prompt generated]', id, desc)
       setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], prompt: desc, promptLoading: false } } : prev)
+    })
+    uploadToFalCdn(src).then(falUrl => {
+      console.log('[fal cdn uploaded]', id, falUrl)
+      setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], falUrl } } : prev)
     })
   }, [pan, zoom, readImageFile])
 
@@ -349,12 +394,19 @@ export default function App() {
           const { src, w, h } = await readImageFile(file)
           const canvasPos = screenToCanvas(window.innerWidth / 2, window.innerHeight / 2, panRef.current, zoomRef.current)
           const id = uid()
+          console.log('[image uploaded]', id)
           setNodes(prev => ({
             ...prev,
             [id]: { id, pos: canvasPos, image: src, naturalW: w, naturalH: h, type: 'anchor', prompt: null, promptLoading: true },
           }))
+          console.log('[prompt requested]', id)
           generateDescription(src).then(desc => {
+            console.log('[prompt generated]', id, desc)
             setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], prompt: desc, promptLoading: false } } : prev)
+          })
+          uploadToFalCdn(src).then(falUrl => {
+            console.log('[fal cdn uploaded]', id, falUrl)
+            setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], falUrl } } : prev)
           })
           break
         }
@@ -403,7 +455,7 @@ export default function App() {
   // ── Canvas click: deselect ──────────────────────────────────────────────
 
   const handleCanvasClick = useCallback((e) => {
-    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]')
+    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || e.target.closest('[data-prompt-panel]')
     if (!isInteractive) {
       setSelected(null)
     }
@@ -657,23 +709,41 @@ export default function App() {
     const anchorNode = nodes[spectrum.anchorId]
     const description = anchorNode?.prompt || ''
 
+    console.log('[spectrum prompt requested]', { dimension: value, steps: allIds.length })
+    const falUrl = anchorNode?.falUrl
     generateSpectrumPrompts(description, value, allIds.length).then(prompts => {
+      console.log('[spectrum prompt generated]', prompts)
+      // Assign prompts and placeholder colors, keep loading for image gen
       setNodes(prev => {
         const next = { ...prev }
         allIds.forEach((id, i) => {
           if (!next[id]) return
           next[id] = {
             ...next[id],
-            loading: false,
             prompt: prompts[i] || null,
             color: mockColor(i, allIds.length),
           }
         })
         return next
       })
+      // Generate images in parallel for all nodes
+      allIds.forEach((id, i) => {
+        const prompt = prompts[i]
+        if (!prompt || !falUrl) {
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+          return
+        }
+        console.log(`[node ${id} generating image]`)
+        generateImage(falUrl, prompt).then(imageUrl => {
+          console.log(`[node ${id} image generated]`, imageUrl)
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false, image: imageUrl, falUrl: imageUrl } } : prev)
+        }).catch(err => {
+          console.error(`[node ${id} image error]`, err)
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+        })
+      })
       setGeneratingSpectrumIdx(null)
     }).catch(() => {
-      // On error, stop loading state
       setNodes(prev => {
         const next = { ...prev }
         allIds.forEach(id => {

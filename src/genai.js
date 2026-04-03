@@ -1,6 +1,9 @@
 import { GoogleGenAI } from "@google/genai"
+import { fal } from "@fal-ai/client"
 
 const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY })
+
+fal.config({ credentials: import.meta.env.VITE_FAL_KEY })
 
 const PROMPT =
   "Write an image prompt for nanobanana model to create this. Focus on describing the composition, subject actions, colours and style rather than very specific details. Return only the prompt."
@@ -76,4 +79,33 @@ export async function generateSpectrumPrompts(description, dimension, steps) {
   }
 
   return prompts
+}
+
+/**
+ * Uploads a data URL to FAL CDN, returns the CDN URL.
+ */
+export async function uploadToFalCdn(dataUrl) {
+  const [meta, base64] = dataUrl.split(",")
+  const mimeType = meta.match(/:(.*?);/)?.[1] ?? "image/jpeg"
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  const blob = new Blob([bytes], { type: mimeType })
+  const file = new File([blob], "image." + mimeType.split("/")[1], { type: mimeType })
+  return fal.storage.upload(file)
+}
+
+/**
+ * Generates an edited image using Grok Imagine via FAL.
+ * Returns the CDN URL of the generated image.
+ */
+export async function generateImage(falImageUrl, prompt) {
+  const result = await fal.subscribe("xai/grok-imagine-image/edit", {
+    input: {
+      prompt: "Modify the image according to the new instruction: " + prompt,
+      image_urls: [falImageUrl],
+      num_images: 1,
+    },
+  })
+  return result.data.images[0].url
 }
