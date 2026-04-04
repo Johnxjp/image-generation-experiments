@@ -235,7 +235,12 @@ function PromptButton({ node, onClick }) {
 function ImageCard({ node, selected, onMouseDown, onClick }) {
   const isPlaceholder = !node.image && node.color
   const isLoading = node.loading
-  const aspectRatio = node.image ? (node.naturalH / node.naturalW || 1) : 0.75
+  const hasSourceImage = isLoading && node.sourceImage
+  const aspectRatio = node.image
+    ? (node.naturalH / node.naturalW || 1)
+    : hasSourceImage
+      ? (node.sourceNaturalH / node.sourceNaturalW || 1)
+      : 0.75
   const h = CARD_W * aspectRatio
 
   return (
@@ -265,14 +270,26 @@ function ImageCard({ node, selected, onMouseDown, onClick }) {
     >
       {isLoading && (
         <div style={{
-          width: CARD_W, height: CARD_W * 0.75, display: 'flex', alignItems: 'center',
-          justifyContent: 'center',
+          width: CARD_W, height: hasSourceImage ? h : CARD_W * 0.75,
+          position: 'relative',
         }}>
+          {hasSourceImage && (
+            <img
+              src={node.sourceImage}
+              draggable={false}
+              style={{ width: '100%', display: 'block', opacity: 0.3 }}
+            />
+          )}
           <div style={{
-            width: 24, height: 24, borderRadius: '50%',
-            border: '2px solid var(--accent)', borderTopColor: 'transparent',
-            animation: 'spin 0.8s linear infinite',
-          }} />
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <div style={{
+              width: 24, height: 24, borderRadius: '50%',
+              border: '2px solid var(--accent)', borderTopColor: 'transparent',
+              animation: 'spin 0.8s linear infinite',
+            }} />
+          </div>
         </div>
       )}
       {isPlaceholder && !isLoading && (
@@ -1051,15 +1068,18 @@ export default function App() {
     const falUrl = anchorNode?.falUrl
     generateSpectrumPrompts(description, value, allIds.length).then(prompts => {
       console.log('[spectrum prompt generated]', prompts)
-      // Assign prompts and placeholder colors, keep loading for image gen
+      // Assign prompts, use anchor image as faded placeholder
       setNodes(prev => {
+        const anchor = prev[spectrum.anchorId]
         const next = { ...prev }
         allIds.forEach((id, i) => {
           if (!next[id]) return
           next[id] = {
             ...next[id],
             prompt: prompts[i] || null,
-            color: mockColor(i, allIds.length),
+            sourceImage: anchor?.image || null,
+            sourceNaturalW: anchor?.naturalW,
+            sourceNaturalH: anchor?.naturalH,
           }
         })
         return next
