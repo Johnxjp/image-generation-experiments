@@ -23,6 +23,124 @@ function mockColor(index, total) {
   return `hsl(${hue}, 55%, ${55 + index * 4}%)`
 }
 
+// ── Save / Load helpers ─────────────────────────────────────────────────────
+
+function formatSaveTitle() {
+  const now = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  return `canvas ${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${String(now.getFullYear()).slice(2)} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+}
+
+function getSaves() {
+  try { return JSON.parse(localStorage.getItem('spectrum-saves') || '[]') }
+  catch { return [] }
+}
+
+function storeSave(entry) {
+  const saves = getSaves()
+  saves.push(entry)
+  localStorage.setItem('spectrum-saves', JSON.stringify(saves))
+}
+
+function deleteSave(id) {
+  const saves = getSaves().filter(s => s.id !== id)
+  localStorage.setItem('spectrum-saves', JSON.stringify(saves))
+}
+
+async function generateThumbnail(nodes, spectrums) {
+  const THUMB_W = 800, THUMB_H = 600, PAD = 40
+  const nodeList = Object.values(nodes)
+  if (nodeList.length === 0) return null
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  for (const node of nodeList) {
+    const ar = node.image ? (node.naturalH / node.naturalW || 1) : 0.75
+    const h = CARD_W * ar
+    minX = Math.min(minX, node.pos.x - CARD_W / 2)
+    minY = Math.min(minY, node.pos.y - h / 2)
+    maxX = Math.max(maxX, node.pos.x + CARD_W / 2)
+    maxY = Math.max(maxY, node.pos.y + h / 2)
+  }
+
+  const cw = maxX - minX + PAD * 2
+  const ch = maxY - minY + PAD * 2
+  const scale = Math.min(THUMB_W / cw, THUMB_H / ch)
+
+  const cvs = document.createElement('canvas')
+  cvs.width = THUMB_W; cvs.height = THUMB_H
+  const ctx = cvs.getContext('2d')
+
+  // Background
+  const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0e0e1a'
+  ctx.fillStyle = bg
+  ctx.fillRect(0, 0, THUMB_W, THUMB_H)
+
+  const ox = (THUMB_W - cw * scale) / 2 - minX * scale + PAD * scale
+  const oy = (THUMB_H - ch * scale) / 2 - minY * scale + PAD * scale
+
+  // Draw spectrum lines
+  const lineColor = getComputedStyle(document.documentElement).getPropertyValue('--line-color').trim() || 'rgba(255,255,255,0.15)'
+  ctx.strokeStyle = lineColor
+  ctx.lineWidth = Math.max(1, 1.5 * scale)
+  ctx.lineJoin = 'round'
+  for (const s of spectrums) {
+    const anchor = nodes[s.anchorId], endpoint = nodes[s.endpointId]
+    if (!anchor || !endpoint) continue
+    const pts = [anchor.pos, ...s.intermediateIds.map(id => nodes[id]?.pos).filter(Boolean), endpoint.pos]
+    ctx.beginPath()
+    pts.forEach((p, i) => {
+      const x = p.x * scale + ox, y = p.y * scale + oy
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
+    })
+    ctx.stroke()
+  }
+
+  // Load images
+  const loaded = await Promise.all(nodeList.map(node => {
+    if (!node.image) return Promise.resolve({ node, img: null })
+    return new Promise(resolve => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => resolve({ node, img })
+      img.onerror = () => resolve({ node, img: null })
+      img.src = node.image
+    })
+  }))
+
+  // Draw nodes
+  for (const { node, img } of loaded) {
+    const ar = node.image ? (node.naturalH / node.naturalW || 1) : 0.75
+    const h = CARD_W * ar
+    const x = (node.pos.x - CARD_W / 2) * scale + ox
+    const y = (node.pos.y - h / 2) * scale + oy
+    const w = CARD_W * scale, sh = h * scale
+
+    // Rounded rect clip
+    const r = 6 * scale
+    ctx.save()
+    ctx.beginPath()
+    ctx.roundRect(x, y, w, sh, r)
+    ctx.clip()
+
+    if (img) {
+      ctx.drawImage(img, x, y, w, sh)
+    } else if (node.color) {
+      ctx.fillStyle = node.color
+      ctx.fillRect(x, y, w, sh)
+    }
+    ctx.restore()
+
+    // Border
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.roundRect(x, y, w, sh, r)
+    ctx.stroke()
+  }
+
+  return cvs.toDataURL('image/png', 0.8)
+}
+
 // ── Canvas coordinate transforms ─────────────────────────────────────────────
 
 function screenToCanvas(sx, sy, pan, zoom) {
@@ -51,7 +169,7 @@ function DropHint({ visible }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, display: 'flex', alignItems: 'center',
-      justifyContent: 'center', pointerEvents: visible ? 'auto' : 'none',
+      justifyContent: 'center', pointerEvents: 'none',
       background: visible ? 'rgba(0,0,0,0.15)' : 'transparent',
       transition: 'background 0.2s', zIndex: 100,
     }}>
@@ -310,6 +428,109 @@ function PromptPanel({ node, onClose }) {
   )
 }
 
+// ── Saved boards modal ──────────────────────────────────────────────────────
+
+function SavedBoardsModal({ onLoad, onClose, onImport }) {
+  const [saves, setSaves] = useState(getSaves())
+  const fileRef = useRef(null)
+
+  const handleDelete = (e, id) => {
+    e.stopPropagation()
+    deleteSave(id)
+    setSaves(getSaves())
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: 'var(--card-bg)', borderRadius: 12, padding: 24,
+        maxWidth: 720, width: '90%', maxHeight: '80vh', overflow: 'auto',
+        border: '1px solid var(--card-border)',
+      }}>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          marginBottom: 20,
+        }}>
+          <span style={{
+            fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 500, color: 'var(--text)',
+          }}>Saved Canvases</span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button onClick={() => fileRef.current?.click()} style={{
+              padding: '6px 12px', borderRadius: 6, background: 'transparent',
+              border: '1px solid var(--card-border)', color: 'var(--text)',
+              fontFamily: 'var(--mono)', fontSize: 12, cursor: 'pointer',
+            }}>Import JSON</button>
+            <div onClick={onClose} style={{
+              width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--text-dim)', fontSize: 18,
+            }}>&times;</div>
+          </div>
+        </div>
+
+        <input ref={fileRef} type="file" accept=".json" style={{ display: 'none' }}
+          onChange={e => {
+            const file = e.target.files?.[0]
+            if (!file) return
+            const reader = new FileReader()
+            reader.onload = ev => {
+              try { onImport(JSON.parse(ev.target.result)) } catch { /* invalid */ }
+            }
+            reader.readAsText(file)
+            e.target.value = ''
+          }}
+        />
+
+        {saves.length === 0 && (
+          <p style={{
+            fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-dim)',
+            textAlign: 'center', padding: 40, margin: 0,
+          }}>No saved canvases yet</p>
+        )}
+
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 16,
+        }}>
+          {saves.map(save => (
+            <div key={save.id} onClick={() => onLoad(save)} style={{
+              borderRadius: 8, border: '1px solid var(--card-border)',
+              overflow: 'hidden', cursor: 'pointer', transition: 'border-color 0.15s',
+            }}
+              onMouseEnter={e => e.currentTarget.style.borderColor = 'var(--accent)'}
+              onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--card-border)'}
+            >
+              {save.thumbnail && (
+                <img src={save.thumbnail} draggable={false}
+                  style={{ width: '100%', display: 'block', aspectRatio: '4/3', objectFit: 'cover' }} />
+              )}
+              <div style={{ padding: '8px 10px' }}>
+                <div style={{
+                  fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)', marginBottom: 4,
+                }}>{save.title}</div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{
+                    fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
+                  }}>{Object.keys(save.nodes).length} nodes</span>
+                  <div onClick={e => handleDelete(e, save.id)} style={{
+                    fontSize: 10, color: 'var(--text-dim)', cursor: 'pointer',
+                    fontFamily: 'var(--mono)',
+                  }}
+                    onMouseEnter={e => e.currentTarget.style.color = '#e55'}
+                    onMouseLeave={e => e.currentTarget.style.color = 'var(--text-dim)'}
+                  >delete</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -326,6 +547,7 @@ export default function App() {
   const [generationTimers, setGenerationTimers] = useState([])
   const [generatingSpectrumIdx, setGeneratingSpectrumIdx] = useState(null)
   const [promptPanelOpen, setPromptPanelOpen] = useState(false)
+  const [showLoadModal, setShowLoadModal] = useState(false)
 
   const containerRef = useRef(null)
   const panStart = useRef(null)
@@ -354,14 +576,61 @@ export default function App() {
   // ── Drop handling ────────────────────────────────────────────────────────
 
   const handleDrop = useCallback(async (e) => {
+    console.log('[drop] event fired')
     e.preventDefault()
     setDropHover(false)
 
-    const file = e.dataTransfer?.files?.[0]
-    if (!file || !file.type.startsWith('image/')) return
+    console.log('[drop] files:', e.dataTransfer?.files?.length, 'types:', [...(e.dataTransfer?.types || [])])
+    let file = e.dataTransfer?.files?.[0]
+
+    // Handle images dragged from browser (URL instead of file)
+    if (!file || !file.type.startsWith('image/')) {
+      const url = e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain')
+      if (url && /^https?:\/\/.+/i.test(url)) {
+        console.log('[drop] fetching image from URL:', url)
+        try {
+          const resp = await fetch(url)
+          const blob = await resp.blob()
+          if (!blob.type.startsWith('image/')) { console.log('[drop] URL is not an image, type:', blob.type); return }
+          file = new File([blob], 'dropped-image', { type: blob.type })
+        } catch (err) {
+          console.log('[drop] failed to fetch URL:', err)
+          // Try extracting from HTML (e.g. <img src="...">)
+          const html = e.dataTransfer.getData('text/html')
+          const match = html?.match(/<img[^>]+src=["']([^"']+)["']/)
+          if (match) {
+            console.log('[drop] trying img src from HTML:', match[1])
+            try {
+              const resp = await fetch(match[1])
+              const blob = await resp.blob()
+              if (!blob.type.startsWith('image/')) { console.log('[drop] HTML img is not an image'); return }
+              file = new File([blob], 'dropped-image', { type: blob.type })
+            } catch (err2) { console.log('[drop] HTML img fetch also failed:', err2); return }
+          } else { return }
+        }
+      } else {
+        // Last resort: try HTML img src
+        const html = e.dataTransfer.getData('text/html')
+        const match = html?.match(/<img[^>]+src=["']([^"']+)["']/)
+        if (match) {
+          console.log('[drop] trying img src from HTML:', match[1])
+          try {
+            const resp = await fetch(match[1])
+            const blob = await resp.blob()
+            if (!blob.type.startsWith('image/')) { console.log('[drop] HTML img is not an image'); return }
+            file = new File([blob], 'dropped-image', { type: blob.type })
+          } catch (err) { console.log('[drop] HTML img fetch failed:', err); return }
+        } else {
+          console.log('[drop] no file or image URL found'); return
+        }
+      }
+    }
+    console.log('[drop] image file:', file.name, file.type, file.size)
 
     const { src, w, h } = await readImageFile(file)
+    console.log('[drop] image loaded:', w, 'x', h)
     const canvasPos = screenToCanvas(e.clientX, e.clientY, pan, zoom)
+    console.log('[drop] canvas position:', canvasPos)
     const id = uid()
     console.log('[image uploaded]', id)
 
@@ -415,6 +684,75 @@ export default function App() {
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
   }, [pan, zoom, readImageFile, inputFor])
+
+  // ── Save board ───────────────────────────────────────────────────────────
+
+  const saveBoard = useCallback(async () => {
+    // Strip transient fields
+    const cleanNodes = {}
+    for (const [id, node] of Object.entries(nodes)) {
+      cleanNodes[id] = { ...node, loading: false, promptLoading: false }
+    }
+
+    const thumbnail = await generateThumbnail(cleanNodes, spectrums)
+    const entry = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      title: formatSaveTitle(),
+      thumbnail,
+      nodes: cleanNodes,
+      spectrums,
+      idCounter: _id,
+      version: 1,
+      savedAt: new Date().toISOString(),
+    }
+
+    // Save to localStorage
+    storeSave(entry)
+
+    // Download as JSON
+    const blob = new Blob([JSON.stringify(entry)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${entry.title.replace(/[/:]/g, '-')}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [nodes, spectrums])
+
+  // ── Load board ──────────────────────────────────────────────────────────
+
+  const loadBoard = useCallback((data) => {
+    if (!data?.nodes || !data?.spectrums || data.version !== 1) return
+
+    setNodes(data.nodes)
+    setSpectrums(data.spectrums)
+    if (data.idCounter != null) _id = data.idCounter
+
+    // Clear transient state
+    setSelected(null)
+    setDragging(null)
+    setMoveDrag(null)
+    setInputFor(null)
+    setPromptPanelOpen(false)
+    setShowLoadModal(false)
+    setGenerationTimers([])
+    setGeneratingSpectrumIdx(null)
+
+    // Center camera on last-created node (highest numeric id)
+    const nodeList = Object.values(data.nodes)
+    if (nodeList.length > 0) {
+      const last = nodeList.reduce((best, n) => {
+        const num = parseInt(n.id.slice(1), 10) || 0
+        const bestNum = parseInt(best.id.slice(1), 10) || 0
+        return num > bestNum ? n : best
+      })
+      setPan({
+        x: window.innerWidth / 2 - last.pos.x,
+        y: window.innerHeight / 2 - last.pos.y,
+      })
+      setZoom(1)
+    }
+  }, [])
 
   // ── Plus button drag to create spectrum ─────────────────────────────────
 
@@ -816,8 +1154,9 @@ export default function App() {
       ref={containerRef}
       onMouseDown={handleCanvasMouseDown}
       onClick={handleCanvasClick}
-      onDragOver={e => { e.preventDefault(); setDropHover(true) }}
-      onDragLeave={() => setDropHover(false)}
+      onDragOver={e => { e.preventDefault(); e.stopPropagation(); setDropHover(true) }}
+      onDragEnter={e => { e.preventDefault(); e.stopPropagation(); console.log('[dragenter] target:', e.target.tagName, e.target.className) }}
+      onDragLeave={(e) => { console.log('[dragleave] target:', e.target.tagName); setDropHover(false) }}
       onDrop={handleDrop}
       style={{
         width: '100%', height: '100%', position: 'relative', overflow: 'hidden',
@@ -996,6 +1335,51 @@ export default function App() {
           )
         })()}
       </div>
+
+      {/* Save / Load buttons */}
+      <div style={{
+        position: 'fixed', top: 16, right: 16, display: 'flex', gap: 6, zIndex: 50,
+      }}>
+        {hasNodes && (
+          <div onClick={saveBoard} title="Save canvas" style={{
+            width: 32, height: 32, borderRadius: 6, cursor: 'pointer',
+            background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--text-dim)', transition: 'border-color 0.15s, color 0.15s',
+          }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text)' }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--card-border)'; e.currentTarget.style.color = 'var(--text-dim)' }}
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M7 1v9M3.5 6.5L7 10l3.5-3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M1 12h12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </div>
+        )}
+        <div onClick={() => setShowLoadModal(true)} title="Load canvas" style={{
+          width: 32, height: 32, borderRadius: 6, cursor: 'pointer',
+          background: 'var(--card-bg)', border: '1px solid var(--card-border)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: 'var(--text-dim)', transition: 'border-color 0.15s, color 0.15s',
+        }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text)' }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--card-border)'; e.currentTarget.style.color = 'var(--text-dim)' }}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <path d="M1 3.5A1.5 1.5 0 012.5 2h3l1.5 1.5h4.5A1.5 1.5 0 0113 5v5.5a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 011 10.5z"
+              stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+          </svg>
+        </div>
+      </div>
+
+      {/* Saved boards modal */}
+      {showLoadModal && (
+        <SavedBoardsModal
+          onLoad={loadBoard}
+          onClose={() => setShowLoadModal(false)}
+          onImport={data => loadBoard(data)}
+        />
+      )}
 
       {/* Prompt side panel */}
       {promptPanelOpen && selectedNode && (
