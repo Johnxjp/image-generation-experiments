@@ -198,9 +198,9 @@ function DropHint({ visible }) {
 
 const CARD_W = 200
 
-function findNodeAtPosition(pos, nodesMap, excludeId) {
+function findNodeAtPosition(pos, nodesMap, excludeId, excludeIds) {
   for (const node of Object.values(nodesMap)) {
-    if (node.id === excludeId) continue
+    if (excludeIds ? excludeIds.has(node.id) : node.id === excludeId) continue
     if (!node.image || !node.falUrl) continue
     const ar = node.naturalH / node.naturalW || 1
     const h = CARD_W * ar
@@ -623,14 +623,15 @@ export default function App() {
   const [spectrums, setSpectrums] = useState([])
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
-  const [dragging, setDragging] = useState(null)       // spectrum creation: { anchorId, current }
-  const [moveDrag, setMoveDrag] = useState(null)        // moving node: { nodeId, lastMouse }
-  const [inputFor, setInputFor] = useState(null)
-  const [selected, setSelected] = useState(null)        // selected node id
+  const [dragging, setDragging] = useState(null)       // spectrum creation: { anchorIds, current }
+  const [moveDrag, setMoveDrag] = useState(null)        // moving node: { lastMouse }
+  const [pendingSpectrumIndices, setPendingSpectrumIndices] = useState(null) // array of spectrum indices awaiting dimension input
+  const [pendingInputPos, setPendingInputPos] = useState(null) // canvas position for dimension input
+  const [selected, setSelected] = useState(new Set())   // selected node ids
   const [dropHover, setDropHover] = useState(false)
   const [isPanning, setIsPanning] = useState(false)
   const [generationTimers, setGenerationTimers] = useState([])
-  const [generatingSpectrumIdx, setGeneratingSpectrumIdx] = useState(null)
+  const [generatingSpectrumIndices, setGeneratingSpectrumIndices] = useState(null)
   const [promptPanelOpen, setPromptPanelOpen] = useState(false)
   const [showLoadModal, setShowLoadModal] = useState(false)
   const [hoverTargetId, setHoverTargetId] = useState(null)
@@ -746,7 +747,7 @@ export default function App() {
 
   useEffect(() => {
     const handlePaste = async (e) => {
-      if (inputFor !== null) return
+      if (pendingSpectrumIndices !== null) return
       const items = e.clipboardData?.items
       if (!items) return
       for (const item of items) {
@@ -783,7 +784,7 @@ export default function App() {
     }
     window.addEventListener('paste', handlePaste)
     return () => window.removeEventListener('paste', handlePaste)
-  }, [pan, zoom, readImageFile, inputFor])
+  }, [pan, zoom, readImageFile, pendingSpectrumIndices])
 
   // ── Save board ───────────────────────────────────────────────────────────
 
@@ -834,14 +835,15 @@ export default function App() {
     if (data.idCounter != null) _id = data.idCounter
 
     // Clear transient state
-    setSelected(null)
+    setSelected(new Set())
     setDragging(null)
     setMoveDrag(null)
-    setInputFor(null)
+    setPendingSpectrumIndices(null)
+    setPendingInputPos(null)
     setPromptPanelOpen(false)
     setShowLoadModal(false)
     setGenerationTimers([])
-    setGeneratingSpectrumIdx(null)
+    setGeneratingSpectrumIndices(null)
 
     // Center camera on last-created node (highest numeric id)
     const nodeList = Object.values(data.nodes)
@@ -865,33 +867,45 @@ export default function App() {
     if (!node.image && !node.color) return
     e.preventDefault()
     const canvasPos = screenToCanvas(e.clientX, e.clientY, pan, zoom)
-    setDragging({ anchorId: node.id, current: canvasPos })
-  }, [pan, zoom])
+    setDragging({ anchorIds: [...selected], current: canvasPos })
+  }, [pan, zoom, selected])
 
   // ── Image mousedown: start move drag ────────────────────────────────────
 
   const handleImageMouseDown = useCallback((e, node) => {
-    setSelected(node.id)
+    if (e.shiftKey) {
+      // Shift: don't change selection here (let click handle toggle)
+    } else if (!selected.has(node.id)) {
+      setSelected(new Set([node.id]))
+    }
     e.preventDefault()
 
     setMoveDrag({
-      nodeId: node.id,
       lastMouse: screenToCanvas(e.clientX, e.clientY, pan, zoom),
     })
-  }, [pan, zoom])
+  }, [pan, zoom, selected])
 
   // ── Image click: select ─────────────────────────────────────────────────
 
   const handleImageClick = useCallback((e, node) => {
     e.stopPropagation()
-    setSelected(node.id)
+    if (e.shiftKey) {
+      setSelected(prev => {
+        const next = new Set(prev)
+        if (next.has(node.id)) next.delete(node.id)
+        else next.add(node.id)
+        return next
+      })
+    } else {
+      setSelected(new Set([node.id]))
+    }
   }, [])
 
   // ── Prompt button click ──────────────────────────────────────────────────
 
   const handlePromptClick = useCallback((e, node) => {
     e.stopPropagation()
-    setSelected(node.id)
+    setSelected(new Set([node.id]))
     setPromptPanelOpen(true)
   }, [])
 
@@ -934,7 +948,7 @@ export default function App() {
   const handleCanvasClick = useCallback((e) => {
     const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || e.target.closest('[data-download-btn]') || e.target.closest('[data-prompt-panel]')
     if (!isInteractive) {
-      setSelected(null)
+      setSelected(new Set())
     }
   }, [])
 
@@ -1008,11 +1022,12 @@ export default function App() {
       if (dragging) {
         const canvasPos = screenToCanvas(e.clientX, e.clientY, panRef.current, zoomRef.current)
         setDragging(prev => prev ? { ...prev, current: canvasPos } : null)
-        const hitId = findNodeAtPosition(canvasPos, nodesRef.current, dragging.anchorId)
+        const excludeSet = new Set(dragging.anchorIds)
+        const hitId = findNodeAtPosition(canvasPos, nodesRef.current, null, excludeSet)
         setHoverTargetId(hitId)
       }
 
-      // Move drag — only the dragged node moves; intermediates redistribute
+      // Move drag — move all selected nodes together
       if (moveDrag) {
         const canvasPos = screenToCanvas(e.clientX, e.clientY, panRef.current, zoomRef.current)
         const dx = canvasPos.x - moveDrag.lastMouse.x
@@ -1021,23 +1036,25 @@ export default function App() {
 
         setNodes(prev => {
           let next = { ...prev }
-          const dragged = next[moveDrag.nodeId]
-          if (!dragged) return prev
+          const selectedIds = selected
+          let anyMoved = false
 
-          // Move only the dragged node
-          next[moveDrag.nodeId] = {
-            ...dragged,
-            pos: { x: dragged.pos.x + dx, y: dragged.pos.y + dy },
+          for (const nodeId of selectedIds) {
+            const node = next[nodeId]
+            if (!node) continue
+            anyMoved = true
+            next[nodeId] = {
+              ...node,
+              pos: { x: node.pos.x + dx, y: node.pos.y + dy },
+            }
           }
 
-          // If dragging an anchor or endpoint, redistribute intermediates along the line
-          // If dragging an intermediate, it moves freely — line bends through it
-          const draggedType = dragged.type
-          if (draggedType === 'anchor' || draggedType === 'endpoint') {
-            for (const s of spectrums) {
-              if (s.anchorId === moveDrag.nodeId || s.endpointId === moveDrag.nodeId) {
-                next = redistributeIntermediates(s, next)
-              }
+          if (!anyMoved) return prev
+
+          // Redistribute intermediates for any spectrum involving moved nodes
+          for (const s of spectrums) {
+            if (selectedIds.has(s.anchorId) || selectedIds.has(s.endpointId)) {
+              next = redistributeIntermediates(s, next)
             }
           }
 
@@ -1057,14 +1074,16 @@ export default function App() {
     const handleMouseUp = (e) => {
       // Spectrum creation drag release
       if (dragging) {
-        const anchorNode = nodes[dragging.anchorId]
-        if (!anchorNode) { setDragging(null); setHoverTargetId(null); return }
+        const anchorIds = dragging.anchorIds
+        const firstAnchor = nodes[anchorIds[0]]
+        if (!firstAnchor) { setDragging(null); setHoverTargetId(null); return }
 
-        // Interpolation: dropped on an existing node
+        // Interpolation: dropped on an existing node (only for single-anchor drags)
         const currentHoverTarget = hoverTargetId
         setHoverTargetId(null)
 
-        if (currentHoverTarget) {
+        if (currentHoverTarget && anchorIds.length === 1) {
+          const anchorNode = firstAnchor
           const targetNode = nodes[currentHoverTarget]
           if (targetNode && targetNode.image && targetNode.falUrl && anchorNode.image && anchorNode.falUrl) {
             syncIdCounter(nodes)
@@ -1087,75 +1106,91 @@ export default function App() {
 
             setNodes(prev => ({ ...prev, ...newNodes }))
             setSpectrums(prev => [...prev, {
-              anchorId: dragging.anchorId,
+              anchorId: anchorIds[0],
               endpointId: currentHoverTarget,
               intermediateIds,
               dimension: null,
               type: 'interpolation',
             }])
             setDragging(null)
-            setSelected(null)
+            setSelected(new Set())
 
             startInterpolationGeneration(anchorNode, targetNode, intermediateIds)
             return
           }
         }
 
+        // Dimension spectrum: create one per selected anchor
         const canvasPos = screenToCanvas(e.clientX, e.clientY, panRef.current, zoomRef.current)
-        const d = dist(anchorNode.pos, canvasPos)
-        const dotCount = countDots(d)
 
-        if (dotCount === 0) {
+        // Check if any anchor is far enough
+        let anyValid = false
+        for (const aid of anchorIds) {
+          const anchor = nodes[aid]
+          if (anchor && countDots(dist(anchor.pos, canvasPos)) > 0) { anyValid = true; break }
+        }
+
+        if (!anyValid) {
           setDragging(null)
           return
         }
 
         syncIdCounter(nodes)
-        const endId = uid()
-        const intermediateIds = []
-        const newNodes = {}
+        const allNewNodes = {}
+        const newSpectrums = []
 
-        for (let i = 1; i < dotCount; i++) {
-          const t = i / dotCount
-          const pos = lerp(anchorNode.pos, canvasPos, t)
-          const id = uid()
-          intermediateIds.push(id)
-          newNodes[id] = {
-            id, pos, image: null, color: null, loading: false,
-            type: 'intermediate', naturalW: anchorNode.naturalW, naturalH: anchorNode.naturalH,
+        for (const anchorId of anchorIds) {
+          const anchorNode = nodes[anchorId]
+          if (!anchorNode) continue
+          const d = dist(anchorNode.pos, canvasPos)
+          const dotCount = countDots(d)
+          if (dotCount === 0) continue
+
+          const endId = uid()
+          const intermediateIds = []
+
+          for (let i = 1; i < dotCount; i++) {
+            const t = i / dotCount
+            const pos = lerp(anchorNode.pos, canvasPos, t)
+            const id = uid()
+            intermediateIds.push(id)
+            allNewNodes[id] = {
+              id, pos, image: null, color: null, loading: false,
+              type: 'intermediate', naturalW: anchorNode.naturalW, naturalH: anchorNode.naturalH,
+            }
           }
-        }
 
-        newNodes[endId] = {
-          id: endId, pos: canvasPos, image: null, color: '#e8e8ec', ghosted: true,
-          type: 'endpoint', naturalW: anchorNode.naturalW, naturalH: anchorNode.naturalH,
-        }
+          allNewNodes[endId] = {
+            id: endId, pos: canvasPos, image: null, color: '#e8e8ec', ghosted: true,
+            type: 'endpoint', naturalW: anchorNode.naturalW, naturalH: anchorNode.naturalH,
+          }
 
-        setNodes(prev => ({ ...prev, ...newNodes }))
-
-        const spectrumIndex = spectrums.length
-        console.log('[spectrum create]', {
-          spectrumIndex,
-          anchorId: dragging.anchorId,
-          endpointId: endId,
-          closureSpectrumsLength: spectrums.length,
-          closureSpectrums: spectrums.map((s, i) => ({ i, anchor: s.anchorId, end: s.endpointId })),
-        })
-        setSpectrums(prev => {
-          console.log('[spectrum setSpectrums] prev.length=', prev.length, 'adding at index', prev.length)
-          return [...prev, {
-            anchorId: dragging.anchorId,
+          newSpectrums.push({
+            anchorId,
             endpointId: endId,
             intermediateIds,
             dimension: null,
             type: 'dimension',
-          }]
-        })
+          })
+        }
+
+        if (newSpectrums.length === 0) {
+          setDragging(null)
+          return
+        }
+
+        setNodes(prev => ({ ...prev, ...allNewNodes }))
+
+        const baseIndex = spectrums.length
+        const newIndices = newSpectrums.map((_, i) => baseIndex + i)
+        console.log('[spectrum create multi]', { count: newSpectrums.length, baseIndex, newIndices })
+        setSpectrums(prev => [...prev, ...newSpectrums])
 
         setDragging(null)
-        setSelected(null)
-        setInputFor(spectrumIndex)
-        console.log('[spectrum inputFor set to]', spectrumIndex)
+        setSelected(new Set())
+        setPendingSpectrumIndices(newIndices)
+        setPendingInputPos(canvasPos)
+        console.log('[spectrum pendingSpectrumIndices set to]', newIndices)
       }
 
       // End move drag
@@ -1176,15 +1211,15 @@ export default function App() {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragging, moveDrag, nodes, spectrums.length, hoverTargetId, startInterpolationGeneration])
+  }, [dragging, moveDrag, nodes, spectrums, selected, hoverTargetId, startInterpolationGeneration])
 
   // ── Auto-focus dimension input ───────────────────────────────────────────
 
   useEffect(() => {
-    if (inputFor !== null && inputRef.current) {
+    if (pendingSpectrumIndices !== null && inputRef.current) {
       inputRef.current.focus()
     }
-  }, [inputFor])
+  }, [pendingSpectrumIndices])
 
   // ── Esc key: cancel generation or deselect ──────────────────────────────
 
@@ -1213,32 +1248,60 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === 'Escape') {
-        // Cancel dimension input — remove the pending spectrum and its nodes
-        if (inputFor !== null) {
-          console.log('[Escape] removing spectrum at inputFor=', inputFor)
-          removeSpectrum(inputFor)
-          setInputFor(null)
+        // Cancel dimension input — remove all pending spectrums and their nodes
+        if (pendingSpectrumIndices !== null) {
+          console.log('[Escape] removing spectrums at pendingSpectrumIndices=', pendingSpectrumIndices)
+          const indicesToRemove = new Set(pendingSpectrumIndices)
+          const nodesToRemove = new Set()
+          for (const idx of pendingSpectrumIndices) {
+            const s = spectrums[idx]
+            if (!s) continue
+            s.intermediateIds.forEach(id => nodesToRemove.add(id))
+            if (s.type !== 'interpolation') nodesToRemove.add(s.endpointId)
+          }
+          setNodes(prev => {
+            const next = { ...prev }
+            nodesToRemove.forEach(id => delete next[id])
+            return next
+          })
+          setSpectrums(prev => prev.filter((_, i) => !indicesToRemove.has(i)))
+          setPendingSpectrumIndices(null)
+          setPendingInputPos(null)
           return
         }
 
-        // Cancel ongoing generation — remove the spectrum and its nodes
+        // Cancel ongoing generation — remove the spectrums and their nodes
         if (generationTimers.length > 0) {
           generationTimers.forEach(t => clearTimeout(t))
           setGenerationTimers([])
-          if (generatingSpectrumIdx !== null) {
-            removeSpectrum(generatingSpectrumIdx)
-            setGeneratingSpectrumIdx(null)
+          if (generatingSpectrumIndices !== null) {
+            const indicesToRemove = new Set(generatingSpectrumIndices)
+            const nodesToRemove = new Set()
+            for (const idx of generatingSpectrumIndices) {
+              const s = spectrums[idx]
+              if (!s) continue
+              s.intermediateIds.forEach(id => nodesToRemove.add(id))
+              if (s.type !== 'interpolation') nodesToRemove.add(s.endpointId)
+            }
+            setNodes(prev => {
+              const next = { ...prev }
+              nodesToRemove.forEach(id => delete next[id])
+              return next
+            })
+            setSpectrums(prev => prev.filter((_, i) => !indicesToRemove.has(i)))
+            setGeneratingSpectrumIndices(null)
           }
           return
         }
 
-        // Deselect
-        setSelected(null)
+        // Deselect all
+        setSelected(new Set())
       }
 
-      // Copy selected node's image to clipboard
-      if (e.key === 'c' && (e.metaKey || e.ctrlKey) && selected && inputFor === null) {
-        const selNode = nodes[selected]
+      // Copy selected node's image to clipboard (only when single node selected)
+      if (e.key === 'c' && (e.metaKey || e.ctrlKey) && selected.size === 1 && pendingSpectrumIndices === null) {
+        const selId = [...selected][0]
+        const selNode = nodes[selId]
         if (selNode?.image) {
           e.preventDefault()
           _copiedNode = { prompt: selNode.prompt, falUrl: selNode.falUrl }
@@ -1257,145 +1320,148 @@ export default function App() {
         }
       }
 
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selected && inputFor === null) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selected.size > 0 && pendingSpectrumIndices === null) {
         e.preventDefault()
-        const selNode = nodes[selected]
-        if (!selNode) return
-        console.log('[Delete/Backspace]', { selected, nodeType: selNode.type, inputFor })
+        const toRemoveNodes = new Set()
+        const affectedSpectrumIndices = new Set()
 
-        if (selNode.type === 'intermediate') {
-          // Splice this intermediate out of its spectrum — spectrum survives
-          setNodes(prev => {
-            const next = { ...prev }
-            delete next[selected]
-            return next
-          })
-          setSpectrums(prev => prev.map(s => {
-            if (!s.intermediateIds.includes(selected)) return s
-            return { ...s, intermediateIds: s.intermediateIds.filter(id => id !== selected) }
-          }))
-        } else {
-          // Anchor or endpoint: dissolve all spectrums this node belongs to
-          console.log('[Delete anchor/endpoint]', { selected, dissolving: spectrums.filter(s => s.anchorId === selected || s.endpointId === selected).length, spectrums: spectrums.map((s,i) => ({i, anchor: s.anchorId, end: s.endpointId})) })
-          const affectedSpectrums = spectrums
-            .map((s, i) => ({ s, i }))
-            .filter(({ s }) => s.anchorId === selected || s.endpointId === selected)
+        for (const selId of selected) {
+          const selNode = nodes[selId]
+          if (!selNode) continue
 
-          const toRemove = new Set([selected])
-          for (const { s } of affectedSpectrums) {
-            // Always remove intermediates
-            for (const id of s.intermediateIds) toRemove.add(id)
-            // For dimension spectrums, also remove the endpoint (it was created for the spectrum)
-            // For interpolation spectrums, don't remove anchor or endpoint (they're existing nodes)
-            if (s.type !== 'interpolation') {
-              const otherEnd = s.anchorId === selected ? s.endpointId : s.anchorId
-              const node = nodes[otherEnd]
-              if (node && !node.image && !node.color) toRemove.add(otherEnd)
+          if (selNode.type === 'intermediate') {
+            toRemoveNodes.add(selId)
+          } else {
+            toRemoveNodes.add(selId)
+            const affected = spectrums
+              .map((s, i) => ({ s, i }))
+              .filter(({ s }) => s.anchorId === selId || s.endpointId === selId)
+
+            for (const { s, i } of affected) {
+              affectedSpectrumIndices.add(i)
+              for (const id of s.intermediateIds) toRemoveNodes.add(id)
+              if (s.type !== 'interpolation') {
+                const otherEnd = s.anchorId === selId ? s.endpointId : s.anchorId
+                const node = nodes[otherEnd]
+                if (node && !node.image && !node.color) toRemoveNodes.add(otherEnd)
+              }
             }
           }
-
-          setNodes(prev => {
-            const next = { ...prev }
-            toRemove.forEach(id => delete next[id])
-            return next
-          })
-
-          const affectedIndices = new Set(affectedSpectrums.map(({ i }) => i))
-          setSpectrums(prev => prev.filter((_, i) => !affectedIndices.has(i)))
         }
 
-        setSelected(null)
+        setNodes(prev => {
+          const next = { ...prev }
+          toRemoveNodes.forEach(id => delete next[id])
+          return next
+        })
+
+        // Remove affected spectrums, and also splice deleted intermediates out of surviving spectrums
+        setSpectrums(prev => prev
+          .filter((_, i) => !affectedSpectrumIndices.has(i))
+          .map(s => {
+            const filtered = s.intermediateIds.filter(id => !toRemoveNodes.has(id))
+            return filtered.length === s.intermediateIds.length ? s : { ...s, intermediateIds: filtered }
+          })
+        )
+
+        setSelected(new Set())
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [inputFor, generationTimers, generatingSpectrumIdx, removeSpectrum, selected, spectrums, nodes])
+  }, [pendingSpectrumIndices, generationTimers, generatingSpectrumIndices, removeSpectrum, selected, spectrums, nodes])
 
   // ── Submit dimension → mock generation ───────────────────────────────────
 
   const handleDimensionSubmit = useCallback((e) => {
     e.preventDefault()
     const value = inputRef.current?.value?.trim()
-    if (!value || inputFor === null) return
+    if (!value || pendingSpectrumIndices === null) return
 
-    const spectrum = spectrums[inputFor]
-    if (!spectrum) return
-    console.log('[dimension submit]', { inputFor, anchor: spectrum.anchorId, end: spectrum.endpointId, value })
+    const pendingIndices = pendingSpectrumIndices
+    const pendingSpectrums = pendingIndices.map(i => spectrums[i]).filter(Boolean)
+    if (pendingSpectrums.length === 0) return
+    console.log('[dimension submit multi]', { pendingIndices, value })
 
+    // Set dimension on all pending spectrums
     setSpectrums(prev => prev.map((s, i) =>
-      i === inputFor ? { ...s, dimension: value } : s
+      pendingIndices.includes(i) ? { ...s, dimension: value } : s
     ))
 
-    const allIds = [...spectrum.intermediateIds, spectrum.endpointId]
+    // Mark all nodes as loading
     setNodes(prev => {
-      const anchor = prev[spectrum.anchorId]
       const next = { ...prev }
-      allIds.forEach(id => {
-        if (next[id]) next[id] = {
-          ...next[id], loading: true, ghosted: false,
-          sourceImage: anchor?.image || null,
-          sourceNaturalW: anchor?.naturalW,
-          sourceNaturalH: anchor?.naturalH,
-        }
-      })
-      return next
-    })
-
-    const generatingIdx = inputFor
-    setInputFor(null)
-    setGeneratingSpectrumIdx(generatingIdx)
-
-    const anchorNode = nodes[spectrum.anchorId]
-    const description = anchorNode?.prompt || ''
-
-    console.log('[spectrum prompt requested]', { dimension: value, steps: allIds.length })
-    const falUrl = anchorNode?.falUrl
-    generateSpectrumPrompts(description, value, allIds.length).then(prompts => {
-      console.log('[spectrum prompt generated]', prompts)
-      // Assign prompts, use anchor image as faded placeholder
-      setNodes(prev => {
+      for (const spectrum of pendingSpectrums) {
         const anchor = prev[spectrum.anchorId]
-        const next = { ...prev }
-        allIds.forEach((id, i) => {
-          if (!next[id]) return
-          next[id] = {
-            ...next[id],
-            prompt: prompts[i] || null,
+        const allIds = [...spectrum.intermediateIds, spectrum.endpointId]
+        allIds.forEach(id => {
+          if (next[id]) next[id] = {
+            ...next[id], loading: true, ghosted: false,
             sourceImage: anchor?.image || null,
             sourceNaturalW: anchor?.naturalW,
             sourceNaturalH: anchor?.naturalH,
           }
         })
-        return next
-      })
-      // Generate images in parallel for all nodes
-      allIds.forEach((id, i) => {
-        const prompt = prompts[i]
-        if (!prompt || !falUrl) {
-          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
-          return
-        }
-        console.log(`[node ${id} generating image]`)
-        generateImage(falUrl, prompt).then(imageUrl => {
-          console.log(`[node ${id} image generated]`, imageUrl)
-          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false, image: imageUrl, falUrl: imageUrl } } : prev)
-        }).catch(err => {
-          console.error(`[node ${id} image error]`, err)
-          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
-        })
-      })
-      setGeneratingSpectrumIdx(null)
-    }).catch(() => {
-      setNodes(prev => {
-        const next = { ...prev }
-        allIds.forEach(id => {
-          if (next[id]) next[id] = { ...next[id], loading: false }
-        })
-        return next
-      })
-      setGeneratingSpectrumIdx(null)
+      }
+      return next
     })
-  }, [inputFor, spectrums, nodes])
+
+    setPendingSpectrumIndices(null)
+    setPendingInputPos(null)
+    setGeneratingSpectrumIndices(pendingIndices)
+
+    // Generate for each spectrum in parallel
+    for (const spectrum of pendingSpectrums) {
+      const anchorNode = nodes[spectrum.anchorId]
+      const description = anchorNode?.prompt || ''
+      const falUrl = anchorNode?.falUrl
+      const allIds = [...spectrum.intermediateIds, spectrum.endpointId]
+
+      console.log('[spectrum prompt requested]', { anchor: spectrum.anchorId, dimension: value, steps: allIds.length })
+      generateSpectrumPrompts(description, value, allIds.length).then(prompts => {
+        console.log('[spectrum prompt generated]', { anchor: spectrum.anchorId, prompts })
+        setNodes(prev => {
+          const anchor = prev[spectrum.anchorId]
+          const next = { ...prev }
+          allIds.forEach((id, i) => {
+            if (!next[id]) return
+            next[id] = {
+              ...next[id],
+              prompt: prompts[i] || null,
+              sourceImage: anchor?.image || null,
+              sourceNaturalW: anchor?.naturalW,
+              sourceNaturalH: anchor?.naturalH,
+            }
+          })
+          return next
+        })
+        allIds.forEach((id, i) => {
+          const prompt = prompts[i]
+          if (!prompt || !falUrl) {
+            setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+            return
+          }
+          console.log(`[node ${id} generating image]`)
+          generateImage(falUrl, prompt).then(imageUrl => {
+            console.log(`[node ${id} image generated]`, imageUrl)
+            setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false, image: imageUrl, falUrl: imageUrl } } : prev)
+          }).catch(err => {
+            console.error(`[node ${id} image error]`, err)
+            setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+          })
+        })
+      }).catch(() => {
+        setNodes(prev => {
+          const next = { ...prev }
+          allIds.forEach(id => {
+            if (next[id]) next[id] = { ...next[id], loading: false }
+          })
+          return next
+        })
+      })
+    }
+    setGeneratingSpectrumIndices(null)
+  }, [pendingSpectrumIndices, spectrums, nodes])
 
   // ── Canvas pan (mouse down on empty space) ───────────────────────────────
 
@@ -1435,24 +1501,26 @@ export default function App() {
 
   // ── Compute dragging preview ─────────────────────────────────────────────
 
-  let dragPreview = null
+  let dragPreviews = []
   if (dragging) {
-    const anchor = nodes[dragging.anchorId]
-    if (anchor) {
-      const targetNode = hoverTargetId ? nodes[hoverTargetId] : null
+    const targetNode = hoverTargetId ? nodes[hoverTargetId] : null
+    for (const anchorId of dragging.anchorIds) {
+      const anchor = nodes[anchorId]
+      if (!anchor) continue
       const endPoint = targetNode ? targetNode.pos : dragging.current
       const dotCount = targetNode ? 4 : countDots(dist(anchor.pos, dragging.current))
       const dots = []
       for (let i = 1; i <= dotCount; i++) {
         dots.push(lerp(anchor.pos, endPoint, i / (dotCount + 1)))
       }
-      dragPreview = { anchor: anchor.pos, endpoint: endPoint, dots, isInterpolation: !!targetNode }
+      dragPreviews.push({ anchor: anchor.pos, endpoint: endPoint, dots, isInterpolation: !!targetNode })
     }
   }
 
   // ── Render ───────────────────────────────────────────────────────────────
 
-  const selectedNode = selected ? nodes[selected] : null
+  const selectedNodes = [...selected].map(id => nodes[id]).filter(Boolean)
+  const singleSelectedNode = selectedNodes.length === 1 ? selectedNodes[0] : null
 
   return (
     <div
@@ -1541,16 +1609,16 @@ export default function App() {
             )
           })}
 
-          {/* Drag preview line + dots */}
-          {dragPreview && (
-            <g>
+          {/* Drag preview lines + dots */}
+          {dragPreviews.map((dp, pi) => (
+            <g key={`dp-${pi}`}>
               <line
-                x1={dragPreview.anchor.x + 10000} y1={dragPreview.anchor.y + 10000}
-                x2={dragPreview.endpoint.x + 10000} y2={dragPreview.endpoint.y + 10000}
+                x1={dp.anchor.x + 10000} y1={dp.anchor.y + 10000}
+                x2={dp.endpoint.x + 10000} y2={dp.endpoint.y + 10000}
                 stroke="var(--line-color)" strokeWidth={1.5}
                 strokeDasharray="6 4"
               />
-              {dragPreview.dots.map((dot, i) => (
+              {dp.dots.map((dot, i) => (
                 <circle
                   key={i}
                   cx={dot.x + 10000} cy={dot.y + 10000}
@@ -1560,15 +1628,15 @@ export default function App() {
                   }}
                 />
               ))}
-              {!dragPreview.isInterpolation && (
+              {!dp.isInterpolation && pi === 0 && (
                 <circle
-                  cx={dragPreview.endpoint.x + 10000} cy={dragPreview.endpoint.y + 10000}
+                  cx={dp.endpoint.x + 10000} cy={dp.endpoint.y + 10000}
                   r={7} fill="none" stroke="var(--accent)" strokeWidth={1.5}
                   opacity={0.5}
                 />
               )}
             </g>
-          )}
+          ))}
         </svg>
 
         {/* Image cards */}
@@ -1577,64 +1645,62 @@ export default function App() {
             <ImageCard
               key={node.id}
               node={node}
-              selected={selected === node.id}
+              selected={selected.has(node.id)}
               highlightAsTarget={hoverTargetId === node.id}
               onMouseDown={handleImageMouseDown}
               onClick={handleImageClick}
             />
           ))}
 
-          {/* Prompt button — only on selected image (not interpolation intermediates) */}
-          {selectedNode && selectedNode.image && !selectedNode.interpolation && (selectedNode.prompt || selectedNode.promptLoading) && (
-            <PromptButton key={`pb-${selectedNode.id}`} node={selectedNode} onClick={handlePromptClick} />
+          {/* Prompt button — only on single selected image (not interpolation intermediates) */}
+          {singleSelectedNode && singleSelectedNode.image && !singleSelectedNode.interpolation && (singleSelectedNode.prompt || singleSelectedNode.promptLoading) && (
+            <PromptButton key={`pb-${singleSelectedNode.id}`} node={singleSelectedNode} onClick={handlePromptClick} />
           )}
 
-          {/* Download button — only on selected image */}
-          {selectedNode && selectedNode.image && (
-            <DownloadButton key={`dl-${selectedNode.id}`} node={selectedNode} offsetIndex={(selectedNode.prompt || selectedNode.promptLoading) ? 1 : 0} onClick={handleDownloadClick} />
+          {/* Download button — only on single selected image */}
+          {singleSelectedNode && singleSelectedNode.image && (
+            <DownloadButton key={`dl-${singleSelectedNode.id}`} node={singleSelectedNode} offsetIndex={(singleSelectedNode.prompt || singleSelectedNode.promptLoading) ? 1 : 0} onClick={handleDownloadClick} />
           )}
 
-          {/* Plus button on selected node */}
-          {selectedNode && (selectedNode.image || selectedNode.color) && (
-            <PlusButton node={selectedNode} onDragStart={handleSpectrumDragStart} />
-          )}
+          {/* Plus button on all selected nodes */}
+          {selectedNodes
+            .filter(n => n.image || n.color)
+            .map(n => (
+              <PlusButton key={`plus-${n.id}`} node={n} onDragStart={handleSpectrumDragStart} />
+            ))
+          }
         </div>
 
         {/* Dimension input */}
-        {inputFor !== null && spectrums[inputFor] && (() => {
-          const s = spectrums[inputFor]
-          const endpoint = nodes[s.endpointId]
-          if (!endpoint) return null
-          return (
-            <div style={{
-              position: 'absolute',
-              left: endpoint.pos.x + 120,
-              top: endpoint.pos.y - 20,
-              pointerEvents: 'auto',
-            }}>
-              <form onSubmit={handleDimensionSubmit}>
-                <input
-                  ref={inputRef}
-                  type="text"
-                  placeholder="Describe the dimension of change..."
-                  style={{
-                    width: 280, padding: '10px 14px',
-                    background: 'var(--card-bg)', border: '1px solid var(--accent)',
-                    borderRadius: 6, color: 'var(--text)', fontFamily: 'var(--mono)',
-                    fontSize: 13, outline: 'none',
-                    boxShadow: '0 0 16px var(--accent-glow)',
-                  }}
-                />
-                <div style={{
-                  marginTop: 6, fontSize: 11, color: 'var(--text-dim)',
-                  fontFamily: 'var(--mono)',
-                }}>
-                  e.g. sweetness, seasons, time of day
-                </div>
-              </form>
-            </div>
-          )
-        })()}
+        {pendingSpectrumIndices !== null && pendingInputPos && (
+          <div style={{
+            position: 'absolute',
+            left: pendingInputPos.x + 120,
+            top: pendingInputPos.y - 20,
+            pointerEvents: 'auto',
+          }}>
+            <form onSubmit={handleDimensionSubmit}>
+              <input
+                ref={inputRef}
+                type="text"
+                placeholder="Describe the dimension of change..."
+                style={{
+                  width: 280, padding: '10px 14px',
+                  background: 'var(--card-bg)', border: '1px solid var(--accent)',
+                  borderRadius: 6, color: 'var(--text)', fontFamily: 'var(--mono)',
+                  fontSize: 13, outline: 'none',
+                  boxShadow: '0 0 16px var(--accent-glow)',
+                }}
+              />
+              <div style={{
+                marginTop: 6, fontSize: 11, color: 'var(--text-dim)',
+                fontFamily: 'var(--mono)',
+              }}>
+                e.g. sweetness, seasons, time of day
+              </div>
+            </form>
+          </div>
+        )}
       </div>
 
       {/* Save / Load buttons */}
@@ -1683,8 +1749,8 @@ export default function App() {
       )}
 
       {/* Prompt side panel */}
-      {promptPanelOpen && selectedNode && (
-        <PromptPanel node={selectedNode} dimension={spectrums.find(s => s.anchorId === selectedNode.id || s.endpointId === selectedNode.id || s.intermediateIds?.includes(selectedNode.id))?.dimension} onClose={() => setPromptPanelOpen(false)} />
+      {promptPanelOpen && singleSelectedNode && (
+        <PromptPanel node={singleSelectedNode} dimension={spectrums.find(s => s.anchorId === singleSelectedNode.id || s.endpointId === singleSelectedNode.id || s.intermediateIds?.includes(singleSelectedNode.id))?.dimension} onClose={() => setPromptPanelOpen(false)} />
       )}
 
       {/* CSS keyframes */}
