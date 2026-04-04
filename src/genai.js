@@ -63,7 +63,7 @@ export async function generateSpectrumPrompts(description, dimension, steps) {
   const userPrompt = `Image description: ${description}\nDimension of change: ${dimension}\nNumber of steps: ${steps}`
 
   const response = await ai.models.generateContent({
-    model: "gemma-4-31b-it",
+    model: "gemini-3.1-flash-lite-preview",
     config: {
       systemInstruction: SPECTRUM_SYSTEM_PROMPT,
     },
@@ -108,4 +108,90 @@ export async function generateImage(falImageUrl, prompt) {
     },
   })
   return result.data.images[0].url
+}
+
+/**
+ * Generates a one-sentence transition prompt connecting two scenes.
+ */
+export async function generateTransitionPrompt(startPrompt, endPrompt) {
+  const response = await ai.models.generateContent({
+    model: "gemini-3.1-flash-lite-preview",
+    config: {
+      systemInstruction:
+        "Analyze the two provided scenes and describe a one-sentence transition that connects them by focusing on a single continuous motion. Choose subject motion, camera movement or environmental shift to bridge the scenes, ensuring the transition is concise and avoids overly specific technical jargon.",
+    },
+    contents: [{ text: `Scene A: ${startPrompt}\n\nScene B: ${endPrompt}` }],
+  })
+  return response.text
+}
+
+/**
+ * Generates a transition video between two images using Seedance.
+ * Returns the video URL.
+ */
+export async function generateInterpolationVideo(prompt, startImageUrl, endImageUrl) {
+  const result = await fal.subscribe("fal-ai/bytedance/seedance/v1.5/pro/image-to-video", {
+    input: {
+      prompt,
+      aspect_ratio: "16:9",
+      resolution: "480p",
+      duration: "5",
+      enable_safety_checker: true,
+      generate_audio: false,
+      image_url: startImageUrl,
+      end_image_url: endImageUrl,
+    },
+    logs: true,
+    onQueueUpdate: (update) => {
+      if (update.status === "IN_PROGRESS") {
+        update.logs?.map((log) => log.message).forEach(console.log)
+      }
+    },
+  })
+  return result.data.video.url
+}
+
+/**
+ * Downloads a video from FAL and extracts frames at given timestamps.
+ * Returns array of { dataUrl, width, height }.
+ */
+export async function extractFramesFromVideo(videoUrl, timestamps = [1, 2, 3, 4]) {
+  const res = await fetch(videoUrl, {
+    headers: { Authorization: `Key ${import.meta.env.VITE_FAL_KEY}` },
+  })
+  const blob = await res.blob()
+  const objectUrl = URL.createObjectURL(blob)
+
+  try {
+    const video = document.createElement("video")
+    video.src = objectUrl
+    video.preload = "auto"
+    video.muted = true
+
+    await new Promise((resolve, reject) => {
+      video.onloadeddata = resolve
+      video.onerror = reject
+    })
+
+    const canvas = document.createElement("canvas")
+    canvas.width = video.videoWidth
+    canvas.height = video.videoHeight
+    const ctx = canvas.getContext("2d")
+    const frames = []
+
+    for (const t of timestamps) {
+      video.currentTime = t
+      await new Promise((r) => { video.onseeked = r })
+      ctx.drawImage(video, 0, 0)
+      frames.push({
+        dataUrl: canvas.toDataURL("image/jpeg", 0.9),
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+    }
+
+    return frames
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }

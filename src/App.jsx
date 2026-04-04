@@ -1,8 +1,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateImage } from './genai'
+import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateImage, generateTransitionPrompt, generateInterpolationVideo, extractFramesFromVideo } from './genai'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+let _copiedNode = null   // stashed node data from in-app copy
 let _id = 0
 const uid = () => `n${++_id}`
 
@@ -197,6 +198,21 @@ function DropHint({ visible }) {
 
 const CARD_W = 200
 
+function findNodeAtPosition(pos, nodesMap, excludeId) {
+  for (const node of Object.values(nodesMap)) {
+    if (node.id === excludeId) continue
+    if (!node.image || !node.falUrl) continue
+    const ar = node.naturalH / node.naturalW || 1
+    const h = CARD_W * ar
+    const left = node.pos.x - CARD_W / 2
+    const top = node.pos.y - h / 2
+    if (pos.x >= left && pos.x <= left + CARD_W && pos.y >= top && pos.y <= top + h) {
+      return node.id
+    }
+  }
+  return null
+}
+
 function SideButton({ node, offsetIndex, dataAttr, onClick, children }) {
   const aspectRatio = node.image ? (node.naturalH / node.naturalW || 1) : 0.75
   const h = CARD_W * aspectRatio
@@ -260,7 +276,7 @@ function DownloadButton({ node, offsetIndex = 0, onClick }) {
   )
 }
 
-function ImageCard({ node, selected, onMouseDown, onClick }) {
+function ImageCard({ node, selected, highlightAsTarget, onMouseDown, onClick }) {
   const isPlaceholder = !node.image && node.color
   const isLoading = node.loading
   const hasSourceImage = isLoading && node.sourceImage
@@ -282,17 +298,21 @@ function ImageCard({ node, selected, onMouseDown, onClick }) {
         top: node.pos.y - h / 2,
         width: CARD_W,
         borderRadius: 6,
-        border: selected
-          ? '2px solid var(--selection)'
-          : '1px solid var(--card-border)',
+        border: highlightAsTarget
+          ? '2px solid var(--accent)'
+          : selected
+            ? '2px solid var(--selection)'
+            : '1px solid var(--card-border)',
         background: isPlaceholder ? node.color : 'var(--card-bg)',
         overflow: 'hidden',
         cursor: 'pointer',
         opacity: node.ghosted ? 0.45 : 1,
         transition: 'opacity 0.3s, box-shadow 0.3s, border-color 0.15s',
-        boxShadow: selected
-          ? '0 0 0 3px var(--selection-glow), 0 4px 24px rgba(0,0,0,0.12)'
-          : '0 4px 24px rgba(0,0,0,0.08)',
+        boxShadow: highlightAsTarget
+          ? '0 0 0 4px var(--accent-glow), 0 4px 24px rgba(0,0,0,0.12)'
+          : selected
+            ? '0 0 0 3px var(--selection-glow), 0 4px 24px rgba(0,0,0,0.12)'
+            : '0 4px 24px rgba(0,0,0,0.08)',
         userSelect: 'none',
       }}
     >
@@ -553,7 +573,7 @@ function SavedBoardsModal({ onLoad, onClose, onImport }) {
           <p style={{
             fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-dim)',
             textAlign: 'center', padding: 40, margin: 0,
-          }}>No saved canvases yet</p>
+          }}>No saved canvases yet. Use Import JSON to load a saved canvas.</p>
         )}
 
         <div style={{
@@ -578,7 +598,7 @@ function SavedBoardsModal({ onLoad, onClose, onImport }) {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span style={{
                     fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-dim)',
-                  }}>{Object.keys(save.nodes).length} nodes</span>
+                  }}>{save.nodeCount ?? Object.keys(save.nodes || {}).length} nodes</span>
                   <div onClick={e => handleDelete(e, save.id)} style={{
                     fontSize: 10, color: 'var(--text-dim)', cursor: 'pointer',
                     fontFamily: 'var(--mono)',
@@ -613,14 +633,18 @@ export default function App() {
   const [generatingSpectrumIdx, setGeneratingSpectrumIdx] = useState(null)
   const [promptPanelOpen, setPromptPanelOpen] = useState(false)
   const [showLoadModal, setShowLoadModal] = useState(false)
+  const [hoverTargetId, setHoverTargetId] = useState(null)
 
   const containerRef = useRef(null)
   const panStart = useRef(null)
   const inputRef = useRef(null)
   const panRef = useRef(pan)
   const zoomRef = useRef(zoom)
+  const nodesRef = useRef(nodes)
+  const mousePosRef = useRef({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
   panRef.current = pan
   zoomRef.current = zoom
+  nodesRef.current = nodes
 
   // Keep _id in sync with existing node keys (guards against HMR / module reload)
   useEffect(() => { syncIdCounter(nodes) }, [nodes])
@@ -729,18 +753,26 @@ export default function App() {
         if (item.type.startsWith('image/')) {
           const file = item.getAsFile()
           const { src, w, h } = await readImageFile(file)
-          const canvasPos = screenToCanvas(window.innerWidth / 2, window.innerHeight / 2, panRef.current, zoomRef.current)
+          const canvasPos = screenToCanvas(mousePosRef.current.x, mousePosRef.current.y, panRef.current, zoomRef.current)
           const id = uid()
-          console.log('[image uploaded]', id)
-          setNodes(prev => ({
-            ...prev,
-            [id]: { id, pos: canvasPos, image: src, naturalW: w, naturalH: h, type: 'anchor', prompt: null, promptLoading: true },
-          }))
-          console.log('[prompt requested]', id)
-          generateDescription(src).then(desc => {
-            console.log('[prompt generated]', id, desc)
-            setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], prompt: desc, promptLoading: false } } : prev)
-          })
+          const copied = _copiedNode
+          _copiedNode = null
+          console.log('[image uploaded]', id, copied ? '(from board copy)' : '(external)')
+          if (copied?.prompt) {
+            setNodes(prev => ({
+              ...prev,
+              [id]: { id, pos: canvasPos, image: src, naturalW: w, naturalH: h, type: 'anchor', prompt: copied.prompt, promptLoading: false, falUrl: copied.falUrl || null },
+            }))
+          } else {
+            setNodes(prev => ({
+              ...prev,
+              [id]: { id, pos: canvasPos, image: src, naturalW: w, naturalH: h, type: 'anchor', prompt: null, promptLoading: true },
+            }))
+            generateDescription(src).then(desc => {
+              console.log('[prompt generated]', id, desc)
+              setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], prompt: desc, promptLoading: false } } : prev)
+            })
+          }
           uploadToFalCdn(src).then(falUrl => {
             console.log('[fal cdn uploaded]', id, falUrl)
             setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], falUrl } } : prev)
@@ -762,29 +794,34 @@ export default function App() {
       cleanNodes[id] = { ...node, loading: false, promptLoading: false }
     }
 
-    const thumbnail = await generateThumbnail(cleanNodes, spectrums)
-    const entry = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      title: formatSaveTitle(),
-      thumbnail,
-      nodes: cleanNodes,
-      spectrums,
-      idCounter: _id,
-      version: 1,
-      savedAt: new Date().toISOString(),
+    let thumbnail = null
+    try { thumbnail = await generateThumbnail(cleanNodes, spectrums) }
+    catch (err) { console.warn('Thumbnail generation failed:', err) }
+
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+    const title = formatSaveTitle()
+    const savedAt = new Date().toISOString()
+
+    const fullEntry = {
+      id, title, thumbnail,
+      nodes: cleanNodes, spectrums, idCounter: _id,
+      version: 1, savedAt,
     }
 
-    // Save to localStorage
-    storeSave(entry)
-
-    // Download as JSON
-    const blob = new Blob([JSON.stringify(entry)], { type: 'application/json' })
+    // Download as JSON (full data with images)
+    const blob = new Blob([JSON.stringify(fullEntry)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${entry.title.replace(/[/:]/g, '-')}.json`
+    a.download = `${title.replace(/[/:]/g, '-')}.json`
+    document.body.appendChild(a)
     a.click()
+    document.body.removeChild(a)
     URL.revokeObjectURL(url)
+
+    // Save lightweight index entry to localStorage (no image data)
+    const nodeCount = Object.keys(cleanNodes).length
+    storeSave({ id, title, thumbnail, nodeCount, savedAt })
   }, [nodes, spectrums])
 
   // ── Load board ──────────────────────────────────────────────────────────
@@ -793,7 +830,7 @@ export default function App() {
     if (!data?.nodes || !data?.spectrums || data.version !== 1) return
 
     setNodes(data.nodes)
-    setSpectrums(data.spectrums)
+    setSpectrums(data.spectrums.map(s => ({ ...s, type: s.type || 'dimension' })))
     if (data.idCounter != null) _id = data.idCounter
 
     // Clear transient state
@@ -901,14 +938,78 @@ export default function App() {
     }
   }, [])
 
+  // ── Interpolation generation pipeline ─────────────────────────────────────
+
+  const startInterpolationGeneration = useCallback(async (anchorNode, targetNode, intermediateIds) => {
+    try {
+      console.log('[interpolation] generating transition prompt')
+      const transitionPrompt = await generateTransitionPrompt(
+        anchorNode.prompt || '',
+        targetNode.prompt || ''
+      )
+      console.log('[interpolation] transition prompt:', transitionPrompt)
+
+      console.log('[interpolation] generating video')
+      const videoUrl = await generateInterpolationVideo(
+        transitionPrompt,
+        anchorNode.falUrl,
+        targetNode.falUrl
+      )
+      console.log('[interpolation] video URL:', videoUrl)
+
+      console.log('[interpolation] extracting frames')
+      const frames = await extractFramesFromVideo(videoUrl, [1, 2, 3, 4])
+      console.log('[interpolation] frames extracted:', frames.length)
+
+      setNodes(prev => {
+        const next = { ...prev }
+        intermediateIds.forEach((id, i) => {
+          if (!next[id] || !frames[i]) return
+          next[id] = {
+            ...next[id],
+            loading: false,
+            image: frames[i].dataUrl,
+            naturalW: frames[i].width,
+            naturalH: frames[i].height,
+          }
+        })
+        return next
+      })
+
+      // Upload frames to FAL CDN in background
+      intermediateIds.forEach(async (id, i) => {
+        if (!frames[i]) return
+        try {
+          const falUrl = await uploadToFalCdn(frames[i].dataUrl)
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], falUrl } } : prev)
+        } catch (err) {
+          console.error(`[interpolation] CDN upload failed for ${id}`, err)
+        }
+      })
+    } catch (err) {
+      console.error('[interpolation] generation failed:', err)
+      setNodes(prev => {
+        const next = { ...prev }
+        intermediateIds.forEach(id => {
+          if (next[id]) next[id] = { ...next[id], loading: false }
+        })
+        return next
+      })
+    }
+  }, [])
+
   // ── Mouse move ───────────────────────────────────────────────────────────
 
   useEffect(() => {
     const handleMouseMove = (e) => {
+      mousePosRef.current = { x: e.clientX, y: e.clientY }
+
       // Spectrum creation drag
       if (dragging) {
         const canvasPos = screenToCanvas(e.clientX, e.clientY, panRef.current, zoomRef.current)
         setDragging(prev => prev ? { ...prev, current: canvasPos } : null)
+        const hitId = findNodeAtPosition(canvasPos, nodesRef.current, dragging.anchorId)
+        setHoverTargetId(hitId)
       }
 
       // Move drag — only the dragged node moves; intermediates redistribute
@@ -957,7 +1058,48 @@ export default function App() {
       // Spectrum creation drag release
       if (dragging) {
         const anchorNode = nodes[dragging.anchorId]
-        if (!anchorNode) { setDragging(null); return }
+        if (!anchorNode) { setDragging(null); setHoverTargetId(null); return }
+
+        // Interpolation: dropped on an existing node
+        const currentHoverTarget = hoverTargetId
+        setHoverTargetId(null)
+
+        if (currentHoverTarget) {
+          const targetNode = nodes[currentHoverTarget]
+          if (targetNode && targetNode.image && targetNode.falUrl && anchorNode.image && anchorNode.falUrl) {
+            syncIdCounter(nodes)
+            const intermediateIds = []
+            const newNodes = {}
+            for (let i = 1; i <= 4; i++) {
+              const t = i / 5
+              const pos = lerp(anchorNode.pos, targetNode.pos, t)
+              const id = uid()
+              intermediateIds.push(id)
+              newNodes[id] = {
+                id, pos, image: null, color: null, loading: true,
+                type: 'intermediate', interpolation: true,
+                naturalW: anchorNode.naturalW, naturalH: anchorNode.naturalH,
+                sourceImage: anchorNode.image,
+                sourceNaturalW: anchorNode.naturalW,
+                sourceNaturalH: anchorNode.naturalH,
+              }
+            }
+
+            setNodes(prev => ({ ...prev, ...newNodes }))
+            setSpectrums(prev => [...prev, {
+              anchorId: dragging.anchorId,
+              endpointId: currentHoverTarget,
+              intermediateIds,
+              dimension: null,
+              type: 'interpolation',
+            }])
+            setDragging(null)
+            setSelected(null)
+
+            startInterpolationGeneration(anchorNode, targetNode, intermediateIds)
+            return
+          }
+        }
 
         const canvasPos = screenToCanvas(e.clientX, e.clientY, panRef.current, zoomRef.current)
         const d = dist(anchorNode.pos, canvasPos)
@@ -1006,6 +1148,7 @@ export default function App() {
             endpointId: endId,
             intermediateIds,
             dimension: null,
+            type: 'dimension',
           }]
         })
 
@@ -1033,7 +1176,7 @@ export default function App() {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [dragging, moveDrag, nodes, spectrums.length])
+  }, [dragging, moveDrag, nodes, spectrums.length, hoverTargetId, startInterpolationGeneration])
 
   // ── Auto-focus dimension input ───────────────────────────────────────────
 
@@ -1056,7 +1199,9 @@ export default function App() {
       allSpectrums: spectrums.map((s, i) => ({ i, anchor: s.anchorId, end: s.endpointId })),
     })
     console.trace('[spectrum REMOVE stack]')
-    const idsToRemove = [...spectrum.intermediateIds, spectrum.endpointId]
+    const idsToRemove = spectrum.type === 'interpolation'
+      ? [...spectrum.intermediateIds]
+      : [...spectrum.intermediateIds, spectrum.endpointId]
     setNodes(prev => {
       const next = { ...prev }
       idsToRemove.forEach(id => delete next[id])
@@ -1091,6 +1236,27 @@ export default function App() {
         setSelected(null)
       }
 
+      // Copy selected node's image to clipboard
+      if (e.key === 'c' && (e.metaKey || e.ctrlKey) && selected && inputFor === null) {
+        const selNode = nodes[selected]
+        if (selNode?.image) {
+          e.preventDefault()
+          _copiedNode = { prompt: selNode.prompt, falUrl: selNode.falUrl }
+          const img = new Image()
+          img.crossOrigin = 'anonymous'
+          img.onload = () => {
+            const cvs = document.createElement('canvas')
+            cvs.width = img.naturalWidth
+            cvs.height = img.naturalHeight
+            cvs.getContext('2d').drawImage(img, 0, 0)
+            cvs.toBlob(blob => {
+              if (blob) navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+            }, 'image/png')
+          }
+          img.src = selNode.image
+        }
+      }
+
       if ((e.key === 'Delete' || e.key === 'Backspace') && selected && inputFor === null) {
         e.preventDefault()
         const selNode = nodes[selected]
@@ -1117,11 +1283,14 @@ export default function App() {
 
           const toRemove = new Set([selected])
           for (const { s } of affectedSpectrums) {
-            const spectrumNodeIds = [s.anchorId, ...s.intermediateIds, s.endpointId]
-            for (const id of spectrumNodeIds) {
-              if (id === selected) continue
-              const node = nodes[id]
-              if (node && !node.image && !node.color) toRemove.add(id)
+            // Always remove intermediates
+            for (const id of s.intermediateIds) toRemove.add(id)
+            // For dimension spectrums, also remove the endpoint (it was created for the spectrum)
+            // For interpolation spectrums, don't remove anchor or endpoint (they're existing nodes)
+            if (s.type !== 'interpolation') {
+              const otherEnd = s.anchorId === selected ? s.endpointId : s.anchorId
+              const node = nodes[otherEnd]
+              if (node && !node.image && !node.color) toRemove.add(otherEnd)
             }
           }
 
@@ -1270,13 +1439,14 @@ export default function App() {
   if (dragging) {
     const anchor = nodes[dragging.anchorId]
     if (anchor) {
-      const d = dist(anchor.pos, dragging.current)
-      const dotCount = countDots(d)
+      const targetNode = hoverTargetId ? nodes[hoverTargetId] : null
+      const endPoint = targetNode ? targetNode.pos : dragging.current
+      const dotCount = targetNode ? 4 : countDots(dist(anchor.pos, dragging.current))
       const dots = []
       for (let i = 1; i <= dotCount; i++) {
-        dots.push(lerp(anchor.pos, dragging.current, i / (dotCount + 1)))
+        dots.push(lerp(anchor.pos, endPoint, i / (dotCount + 1)))
       }
-      dragPreview = { anchor: anchor.pos, endpoint: dragging.current, dots }
+      dragPreview = { anchor: anchor.pos, endpoint: endPoint, dots, isInterpolation: !!targetNode }
     }
   }
 
@@ -1390,11 +1560,13 @@ export default function App() {
                   }}
                 />
               ))}
-              <circle
-                cx={dragPreview.endpoint.x + 10000} cy={dragPreview.endpoint.y + 10000}
-                r={7} fill="none" stroke="var(--accent)" strokeWidth={1.5}
-                opacity={0.5}
-              />
+              {!dragPreview.isInterpolation && (
+                <circle
+                  cx={dragPreview.endpoint.x + 10000} cy={dragPreview.endpoint.y + 10000}
+                  r={7} fill="none" stroke="var(--accent)" strokeWidth={1.5}
+                  opacity={0.5}
+                />
+              )}
             </g>
           )}
         </svg>
@@ -1406,13 +1578,14 @@ export default function App() {
               key={node.id}
               node={node}
               selected={selected === node.id}
+              highlightAsTarget={hoverTargetId === node.id}
               onMouseDown={handleImageMouseDown}
               onClick={handleImageClick}
             />
           ))}
 
-          {/* Prompt button — only on selected image */}
-          {selectedNode && selectedNode.image && (selectedNode.prompt || selectedNode.promptLoading) && (
+          {/* Prompt button — only on selected image (not interpolation intermediates) */}
+          {selectedNode && selectedNode.image && !selectedNode.interpolation && (selectedNode.prompt || selectedNode.promptLoading) && (
             <PromptButton key={`pb-${selectedNode.id}`} node={selectedNode} onClick={handlePromptClick} />
           )}
 
