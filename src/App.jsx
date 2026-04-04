@@ -1093,9 +1093,15 @@ export default function App() {
 
     const allIds = [...spectrum.intermediateIds, spectrum.endpointId]
     setNodes(prev => {
+      const anchor = prev[spectrum.anchorId]
       const next = { ...prev }
       allIds.forEach(id => {
-        if (next[id]) next[id] = { ...next[id], loading: true, ghosted: false }
+        if (next[id]) next[id] = {
+          ...next[id], loading: true, ghosted: false,
+          sourceImage: anchor?.image || null,
+          sourceNaturalW: anchor?.naturalW,
+          sourceNaturalH: anchor?.naturalH,
+        }
       })
       return next
     })
@@ -1389,7 +1395,7 @@ export default function App() {
 
       {/* Save / Load buttons */}
       <div style={{
-        position: 'fixed', top: 16, right: 16, display: 'flex', gap: 6, zIndex: 50,
+        position: 'fixed', top: 16, left: 16, display: 'flex', gap: 6, zIndex: 50,
       }}>
         {hasNodes && (
           <div onClick={saveBoard} title="Save canvas" style={{
