@@ -6,6 +6,14 @@ import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateI
 let _id = 0
 const uid = () => `n${++_id}`
 
+/** Ensure _id is above all existing node keys so uid() never collides. */
+function syncIdCounter(nodes) {
+  for (const key of Object.keys(nodes)) {
+    const num = parseInt(key.slice(1), 10)
+    if (num > _id) _id = num
+  }
+}
+
 const dist = (a, b) => Math.hypot(b.x - a.x, b.y - a.y)
 const lerp = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t })
 
@@ -189,19 +197,19 @@ function DropHint({ visible }) {
 
 const CARD_W = 200
 
-function PromptButton({ node, onClick }) {
+function SideButton({ node, offsetIndex, dataAttr, onClick, children }) {
   const aspectRatio = node.image ? (node.naturalH / node.naturalW || 1) : 0.75
   const h = CARD_W * aspectRatio
 
   return (
     <div
-      data-prompt-btn
+      {...{ [dataAttr]: true }}
       onMouseDown={e => { e.stopPropagation(); e.preventDefault() }}
       onClick={e => { e.stopPropagation(); onClick(e, node) }}
       style={{
         position: 'absolute',
         left: node.pos.x - CARD_W / 2 - 32,
-        top: node.pos.y - h / 2,
+        top: node.pos.y - h / 2 + offsetIndex * 30,
         width: 24, height: 24, borderRadius: 4,
         background: 'var(--card-bg)',
         border: '1px solid var(--card-border)',
@@ -222,13 +230,33 @@ function PromptButton({ node, onClick }) {
         e.currentTarget.style.opacity = '0.35'
       }}
     >
+      {children}
+    </div>
+  )
+}
+
+function PromptButton({ node, onClick }) {
+  return (
+    <SideButton node={node} offsetIndex={0} dataAttr="data-prompt-btn" onClick={onClick}>
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
         <line x1="1" y1="2" x2="13" y2="2" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
         <line x1="1" y1="5.5" x2="13" y2="5.5" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
         <line x1="1" y1="9" x2="13" y2="9" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
         <line x1="1" y1="12.5" x2="9" y2="12.5" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
       </svg>
-    </div>
+    </SideButton>
+  )
+}
+
+function DownloadButton({ node, offsetIndex = 0, onClick }) {
+  return (
+    <SideButton node={node} offsetIndex={offsetIndex} dataAttr="data-download-btn" onClick={onClick}>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <line x1="7" y1="1" x2="7" y2="9.5" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
+        <polyline points="3.5,7 7,10.5 10.5,7" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <line x1="2" y1="13" x2="12" y2="13" stroke="var(--text-dim)" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    </SideButton>
   )
 }
 
@@ -594,6 +622,9 @@ export default function App() {
   panRef.current = pan
   zoomRef.current = zoom
 
+  // Keep _id in sync with existing node keys (guards against HMR / module reload)
+  useEffect(() => { syncIdCounter(nodes) }, [nodes])
+
   const hasNodes = Object.keys(nodes).length > 0
 
   // ── File reading helper ──────────────────────────────────────────────────
@@ -827,10 +858,44 @@ export default function App() {
     setPromptPanelOpen(true)
   }, [])
 
+  // ── Download button click ───────────────────────────────────────────────
+
+  const handleDownloadClick = useCallback(async (e, node) => {
+    e.stopPropagation()
+    if (!node.image) return
+    const name = node.label || node.id
+    const triggerDownload = (blob, ext) => {
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name + ext
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+    if (node.image.startsWith('data:')) {
+      const [meta, base64] = node.image.split(',')
+      const mimeType = meta.match(/:(.*?);/)?.[1] ?? 'image/jpeg'
+      const binary = atob(base64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      const ext = mimeType === 'image/png' ? '.png' : '.jpg'
+      triggerDownload(new Blob([bytes], { type: mimeType }), ext)
+    } else {
+      const res = await fetch(node.image, {
+        headers: { Authorization: `Key ${import.meta.env.VITE_FAL_KEY}` },
+      })
+      const blob = await res.blob()
+      const ext = blob.type === 'image/png' ? '.png' : '.jpg'
+      triggerDownload(blob, ext)
+    }
+  }, [])
+
   // ── Canvas click: deselect ──────────────────────────────────────────────
 
   const handleCanvasClick = useCallback((e) => {
-    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || e.target.closest('[data-prompt-panel]')
+    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || e.target.closest('[data-download-btn]') || e.target.closest('[data-prompt-panel]')
     if (!isInteractive) {
       setSelected(null)
     }
@@ -903,6 +968,7 @@ export default function App() {
           return
         }
 
+        syncIdCounter(nodes)
         const endId = uid()
         const intermediateIds = []
         const newNodes = {}
@@ -1167,7 +1233,7 @@ export default function App() {
   const handleCanvasMouseDown = useCallback((e) => {
     // Pan if clicking on empty canvas — not on an image card, button, or input
     const tag = e.target.tagName.toLowerCase()
-    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || tag === 'input'
+    const isInteractive = e.target.closest('[data-card]') || e.target.closest('[data-plus]') || e.target.closest('[data-prompt-btn]') || e.target.closest('[data-download-btn]') || tag === 'input'
     if (!isInteractive) {
       e.preventDefault()
       panStart.current = { x: e.clientX, y: e.clientY }
@@ -1348,6 +1414,11 @@ export default function App() {
           {/* Prompt button — only on selected image */}
           {selectedNode && selectedNode.image && (selectedNode.prompt || selectedNode.promptLoading) && (
             <PromptButton key={`pb-${selectedNode.id}`} node={selectedNode} onClick={handlePromptClick} />
+          )}
+
+          {/* Download button — only on selected image */}
+          {selectedNode && selectedNode.image && (
+            <DownloadButton key={`dl-${selectedNode.id}`} node={selectedNode} offsetIndex={(selectedNode.prompt || selectedNode.promptLoading) ? 1 : 0} onClick={handleDownloadClick} />
           )}
 
           {/* Plus button on selected node */}
