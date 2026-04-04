@@ -340,7 +340,7 @@ function PlusButton({ node, onDragStart }) {
 
 // ── Prompt side panel ────────────────────────────────────────────────────────
 
-function PromptPanel({ node, onClose }) {
+function PromptPanel({ node, dimension, onClose }) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = () => {
@@ -358,17 +358,52 @@ function PromptPanel({ node, onClose }) {
       zIndex: 200, display: 'flex', flexDirection: 'column',
       boxShadow: '-4px 0 24px rgba(0,0,0,0.08)',
     }}>
+      {/* Close button pinned top-right */}
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '16px 20px', borderBottom: '1px solid var(--card-border)',
+        display: 'flex', justifyContent: 'flex-end',
+        padding: '12px 16px 0',
       }}>
-        <span style={{
-          fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 500,
-          color: 'var(--text-dim)', letterSpacing: 0.5, textTransform: 'uppercase',
+        <div
+          onClick={onClose}
+          style={{
+            width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'var(--text-dim)', fontSize: 16, lineHeight: 1,
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
+          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          &times;
+        </div>
+      </div>
+      <div style={{ padding: '8px 20px 20px', flex: 1, overflowY: 'auto' }}>
+        {dimension && (
+          <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: '1px solid var(--card-border)' }}>
+            <div style={{
+              fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 500,
+              color: 'var(--text-dim)', letterSpacing: 0.5, textTransform: 'uppercase',
+              marginBottom: 6,
+            }}>
+              Dimension
+            </div>
+            <div style={{
+              fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text)',
+            }}>
+              {dimension}
+            </div>
+          </div>
+        )}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 12,
         }}>
-          Image Prompt
-        </span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{
+            fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 500,
+            color: 'var(--text-dim)', letterSpacing: 0.5, textTransform: 'uppercase',
+          }}>
+            Image Prompt
+          </span>
           {node?.prompt && !node.promptLoading && (
             <div
               onClick={handleCopy}
@@ -394,22 +429,7 @@ function PromptPanel({ node, onClose }) {
               </svg>
             </div>
           )}
-          <div
-            onClick={onClose}
-            style={{
-              width: 24, height: 24, borderRadius: 4, cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: 'var(--text-dim)', fontSize: 16, lineHeight: 1,
-              transition: 'background 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.background = 'rgba(0,0,0,0.06)'}
-            onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-          >
-            &times;
-          </div>
         </div>
-      </div>
-      <div style={{ padding: 20, flex: 1, overflowY: 'auto' }}>
         {node?.promptLoading && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
@@ -906,16 +926,27 @@ export default function App() {
         setNodes(prev => ({ ...prev, ...newNodes }))
 
         const spectrumIndex = spectrums.length
-        setSpectrums(prev => [...prev, {
+        console.log('[spectrum create]', {
+          spectrumIndex,
           anchorId: dragging.anchorId,
           endpointId: endId,
-          intermediateIds,
-          dimension: null,
-        }])
+          closureSpectrumsLength: spectrums.length,
+          closureSpectrums: spectrums.map((s, i) => ({ i, anchor: s.anchorId, end: s.endpointId })),
+        })
+        setSpectrums(prev => {
+          console.log('[spectrum setSpectrums] prev.length=', prev.length, 'adding at index', prev.length)
+          return [...prev, {
+            anchorId: dragging.anchorId,
+            endpointId: endId,
+            intermediateIds,
+            dimension: null,
+          }]
+        })
 
         setDragging(null)
         setSelected(null)
         setInputFor(spectrumIndex)
+        console.log('[spectrum inputFor set to]', spectrumIndex)
       }
 
       // End move drag
@@ -951,6 +982,14 @@ export default function App() {
   const removeSpectrum = useCallback((spectrumIdx) => {
     const spectrum = spectrums[spectrumIdx]
     if (!spectrum) return
+    console.log('[spectrum REMOVE]', {
+      spectrumIdx,
+      anchor: spectrum.anchorId,
+      end: spectrum.endpointId,
+      removingNodes: [...spectrum.intermediateIds, spectrum.endpointId],
+      allSpectrums: spectrums.map((s, i) => ({ i, anchor: s.anchorId, end: s.endpointId })),
+    })
+    console.trace('[spectrum REMOVE stack]')
     const idsToRemove = [...spectrum.intermediateIds, spectrum.endpointId]
     setNodes(prev => {
       const next = { ...prev }
@@ -965,6 +1004,7 @@ export default function App() {
       if (e.key === 'Escape') {
         // Cancel dimension input — remove the pending spectrum and its nodes
         if (inputFor !== null) {
+          console.log('[Escape] removing spectrum at inputFor=', inputFor)
           removeSpectrum(inputFor)
           setInputFor(null)
           return
@@ -989,6 +1029,7 @@ export default function App() {
         e.preventDefault()
         const selNode = nodes[selected]
         if (!selNode) return
+        console.log('[Delete/Backspace]', { selected, nodeType: selNode.type, inputFor })
 
         if (selNode.type === 'intermediate') {
           // Splice this intermediate out of its spectrum — spectrum survives
@@ -1003,6 +1044,7 @@ export default function App() {
           }))
         } else {
           // Anchor or endpoint: dissolve all spectrums this node belongs to
+          console.log('[Delete anchor/endpoint]', { selected, dissolving: spectrums.filter(s => s.anchorId === selected || s.endpointId === selected).length, spectrums: spectrums.map((s,i) => ({i, anchor: s.anchorId, end: s.endpointId})) })
           const affectedSpectrums = spectrums
             .map((s, i) => ({ s, i }))
             .filter(({ s }) => s.anchorId === selected || s.endpointId === selected)
@@ -1043,6 +1085,7 @@ export default function App() {
 
     const spectrum = spectrums[inputFor]
     if (!spectrum) return
+    console.log('[dimension submit]', { inputFor, anchor: spectrum.anchorId, end: spectrum.endpointId, value })
 
     setSpectrums(prev => prev.map((s, i) =>
       i === inputFor ? { ...s, dimension: value } : s
@@ -1252,18 +1295,6 @@ export default function App() {
                   stroke="var(--line-color)" strokeWidth={1.5}
                   strokeLinejoin="round"
                 />
-                {s.dimension && (
-                  <text
-                    x={mid.x + 10000} y={mid.y + 10000 - 14}
-                    textAnchor="middle"
-                    fill="var(--text-dim)"
-                    fontSize={12}
-                    fontFamily="var(--mono)"
-                    transform={`rotate(${Math.abs(angle) > 90 ? angle + 180 : angle}, ${mid.x + 10000}, ${mid.y + 10000 - 14})`}
-                  >
-                    {s.dimension} &rarr;
-                  </text>
-                )}
               </g>
             )
           })}
@@ -1403,7 +1434,7 @@ export default function App() {
 
       {/* Prompt side panel */}
       {promptPanelOpen && selectedNode && (
-        <PromptPanel node={selectedNode} onClose={() => setPromptPanelOpen(false)} />
+        <PromptPanel node={selectedNode} dimension={spectrums.find(s => s.anchorId === selectedNode.id || s.endpointId === selectedNode.id || s.intermediateIds?.includes(selectedNode.id))?.dimension} onClose={() => setPromptPanelOpen(false)} />
       )}
 
       {/* CSS keyframes */}
