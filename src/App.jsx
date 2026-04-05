@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateImage, generateTransitionPrompt, generateInterpolationVideo, extractFramesFromVideo } from './genai'
+import { generateDescription, generateSpectrumPrompts, uploadToFalCdn, generateImage, generateTransitionPrompt, generateInterpolationVideo, extractFramesFromVideo, generateInterpolationPrompts } from './genai'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -956,49 +956,42 @@ export default function App() {
 
   const startInterpolationGeneration = useCallback(async (anchorNode, targetNode, intermediateIds) => {
     try {
-      console.log('[interpolation] generating transition prompt')
-      const transitionPrompt = await generateTransitionPrompt(
+      console.log('[interpolation] generating interpolation prompts')
+      const prompts = await generateInterpolationPrompts(
         anchorNode.prompt || '',
-        targetNode.prompt || ''
+        targetNode.prompt || '',
+        intermediateIds.length
       )
-      console.log('[interpolation] transition prompt:', transitionPrompt)
+      console.log('[interpolation] prompts:', prompts)
 
-      console.log('[interpolation] generating video')
-      const videoUrl = await generateInterpolationVideo(
-        transitionPrompt,
-        anchorNode.falUrl,
-        targetNode.falUrl
-      )
-      console.log('[interpolation] video URL:', videoUrl)
-
-      console.log('[interpolation] extracting frames')
-      const frames = await extractFramesFromVideo(videoUrl, [1, 2, 3, 4])
-      console.log('[interpolation] frames extracted:', frames.length)
-
+      // Store prompts on intermediate nodes
       setNodes(prev => {
         const next = { ...prev }
         intermediateIds.forEach((id, i) => {
-          if (!next[id] || !frames[i]) return
-          next[id] = {
-            ...next[id],
-            loading: false,
-            image: frames[i].dataUrl,
-            naturalW: frames[i].width,
-            naturalH: frames[i].height,
-          }
+          if (!next[id]) return
+          next[id] = { ...next[id], prompt: prompts[i] || null }
         })
         return next
       })
 
-      // Upload frames to FAL CDN in background
-      intermediateIds.forEach(async (id, i) => {
-        if (!frames[i]) return
-        try {
-          const falUrl = await uploadToFalCdn(frames[i].dataUrl)
-          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], falUrl } } : prev)
-        } catch (err) {
-          console.error(`[interpolation] CDN upload failed for ${id}`, err)
+      // Pass both source images to Grok for all intermediate nodes
+      const sourceUrls = [anchorNode.falUrl, targetNode.falUrl]
+
+      // Generate images in parallel
+      intermediateIds.forEach((id, i) => {
+        const prompt = prompts[i]
+        if (!prompt) {
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+          return
         }
+        console.log(`[interpolation node ${id}] generating`)
+        generateImage(sourceUrls, prompt).then(imageUrl => {
+          console.log(`[interpolation node ${id}] image generated`, imageUrl)
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false, image: imageUrl, falUrl: imageUrl } } : prev)
+        }).catch(err => {
+          console.error(`[interpolation node ${id}] image error`, err)
+          setNodes(prev => prev[id] ? { ...prev, [id]: { ...prev[id], loading: false } } : prev)
+        })
       })
     } catch (err) {
       console.error('[interpolation] generation failed:', err)

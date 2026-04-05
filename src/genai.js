@@ -81,6 +81,85 @@ export async function generateSpectrumPrompts(description, dimension, steps) {
   return prompts
 }
 
+const INTERPOLATION_SYSTEM_PROMPT = `You are given two image descriptions representing the start and end of a visual transformation. Your job is to:
+
+1. First, identify the single most prominent dimension of change between them and output it in a <dimension> tag.
+2. Then generate exactly N intermediate step prompts that ALL vary along that same dimension.
+
+CRITICAL: Every single prompt must change ONLY the identified dimension. No other aspect of the scene (sky color, weather, lighting, background details) should change. If the dimension is "vehicle type", then only the vehicle changes — everything else stays identical to the original.
+
+Rules:
+- If the change is continuous (gradual scalar like time of day, temperature, age): each step should be an evenly spaced increment. Steps should be sufficiently far apart to create noticeable differences.
+- If the change is discrete (categorical shift like elephant to lion, car to plane): each step should blend specific concrete features from both subjects. Do NOT use vague terms like "hybrid creature" or "half-X half-Y". Instead, list which specific parts come from which subject (e.g. "four wheels and a car chassis with airplane wings mounted on the roof and a propeller on the hood"). Early steps should keep most features from the start subject with a few specific features from the end. Later steps should keep most features from the end with a few traces of the start.
+- Do NOT repeat the start or end descriptions. The N steps are intermediate only.
+- Each prompt should be self-contained and detailed enough to generate a standalone image.
+- ALL prompts must vary along the SAME dimension identified in the <dimension> tag. Do not introduce secondary changes.
+
+Output format — first the dimension, then the prompts:
+
+<dimension>the identified dimension</dimension>
+<prompt>first intermediate step</prompt>
+<prompt>second intermediate step</prompt>
+...
+
+Here are examples:
+
+Example 1 (continuous):
+Start: A cozy cabin in a snowy forest at dawn, warm light glowing from windows, smoke rising from chimney
+End: A cozy cabin in a snowy forest at night, moonlight casting blue shadows, stars visible, windows dark
+
+<dimension>time of day</dimension>
+<prompt>A cozy cabin in a snowy forest in late morning, bright daylight illuminating the snow, chimney smoke faint, windows reflecting sunlight, clear sky above the trees</prompt>
+<prompt>A cozy cabin in a snowy forest in the afternoon, warm golden sunlight at a low angle, long shadows stretching across the snow, windows catching amber light</prompt>
+<prompt>A cozy cabin in a snowy forest at sunset, orange and pink sky above the treeline, snow tinted warm pink, windows beginning to glow faintly from interior light</prompt>
+<prompt>A cozy cabin in a snowy forest at dusk, deep blue twilight sky with first stars appearing, snow in cool blue tones, windows glowing warmly against the darkening surroundings</prompt>
+
+Example 2 (discrete):
+Start: A tabby cat sitting on a windowsill, afternoon light, potted plant beside it, soft curtains
+End: A green parrot perched on a windowsill, afternoon light, potted plant beside it, soft curtains
+
+<dimension>animal subject</dimension>
+<prompt>A tabby cat sitting on a windowsill with its usual four legs and whiskers, but with small green feathers growing between its ears and a slightly curved hard nose resembling a beak tip, afternoon light, potted plant beside it, soft curtains</prompt>
+<prompt>A cat-sized creature sitting on a windowsill with a tabby-furred body and four paws, but with a full green parrot beak replacing its mouth, two small folded wings sprouting from its shoulder blades, and a fan of green tail feathers replacing its cat tail, afternoon light, potted plant beside it, soft curtains</prompt>
+<prompt>A parrot-shaped creature perched on a windowsill with green feathered wings and a curved beak, but retaining tabby-striped chest plumage, pointed cat ears on top of its head, and long whiskers flanking its beak, afternoon light, potted plant beside it, soft curtains</prompt>
+<prompt>A green parrot perched on a windowsill with full plumage and curved beak, only traces of the cat remaining in its faintly striped breast feathers and slightly pointed ear tufts, afternoon light, potted plant beside it, soft curtains</prompt>
+
+Example 3 (continuous):
+Start: A portrait of a young woman smiling, bright studio lighting, white background
+End: A portrait of an elderly woman smiling, bright studio lighting, white background
+
+<dimension>age</dimension>
+<prompt>A portrait of a woman in her early 30s smiling, faint smile lines beginning to form, bright studio lighting, white background</prompt>
+<prompt>A portrait of a woman in her mid 40s smiling, visible laugh lines and subtle crow's feet, slight softening of jawline, bright studio lighting, white background</prompt>
+<prompt>A portrait of a woman in her late 50s smiling, pronounced smile lines and crow's feet, silver streaks in her hair, slight hollowing of cheeks, bright studio lighting, white background</prompt>
+<prompt>A portrait of a woman in her early 70s smiling, deep wrinkles and expression lines, mostly silver hair, thin skin showing veins on hands, warm and weathered features, bright studio lighting, white background</prompt>`
+
+/**
+ * Generates intermediate interpolation prompts between two image descriptions.
+ * Returns an array of prompt strings.
+ */
+export async function generateInterpolationPrompts(startDescription, endDescription, steps = 4) {
+  const userPrompt = `Start image: ${startDescription}\nEnd image: ${endDescription}\nNumber of intermediate steps: ${steps}`
+
+  const response = await ai.models.generateContent({
+    model: "gemini-3.1-flash-lite-preview",
+    config: {
+      systemInstruction: INTERPOLATION_SYSTEM_PROMPT,
+    },
+    contents: [{ text: userPrompt }],
+  })
+
+  const text = response.text
+  const prompts = []
+  const regex = /<prompt>([\s\S]*?)<\/prompt>/g
+  let match
+  while ((match = regex.exec(text)) !== null) {
+    prompts.push(match[1].trim())
+  }
+
+  return prompts
+}
+
 /**
  * Uploads a data URL to FAL CDN, returns the CDN URL.
  */
@@ -99,11 +178,12 @@ export async function uploadToFalCdn(dataUrl) {
  * Generates an edited image using Grok Imagine via FAL.
  * Returns the CDN URL of the generated image.
  */
-export async function generateImage(falImageUrl, prompt) {
+export async function generateImage(falImageUrls, prompt) {
+  const urls = Array.isArray(falImageUrls) ? falImageUrls : [falImageUrls]
   const result = await fal.subscribe("xai/grok-imagine-image/edit", {
     input: {
       prompt: "Modify the image according to the new instruction: " + prompt,
-      image_urls: [falImageUrl],
+      image_urls: urls,
       num_images: 1,
     },
   })
