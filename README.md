@@ -12,7 +12,7 @@ My starting point was dimensions of change. Inspired by Bryan Loh’s post on cr
 
 For example, a user could explore colour variations or even concepts like “temperature”. Other examples could be “age”, “sweetness” or perhaps even more abstract dimensions like “democracy” (Of course, they don’t have to be single words). Here’s an example.
 
-![image](/assets/creative_exploration/generate.gif)
+![image](/assets/generate.gif)
 
 As I started to poke at this thought, it became immediately clear though that not all concepts could be easily specified by a continuous scale e.g. “mode of transportation”. On top of that, I realised there’s so much room for ambiguity. Changes like “mode of transportation” might be seemingly obvious but what about “temperature”? Does the user mean hotter or colder? What does a “democracy” scale even look like? It’s clearly difficult to design something that works well and so without shame, and for the sake of these early explorations I actually deferred this judgement to an LLM.
 
@@ -20,17 +20,17 @@ I prompted an LLM to generate N variants based on the description of the initial
 
 Below is an example of an attempt to make the original image ‘more dramatic’. What I had in mind was something closer to the third variant in this chain i.e. applying warmer colours, so the LLM surprised me with the final night scene. 
 
-![image](/assets/creative_exploration/dramatic.png)
+![image](/assets/dramatic.png)
 
 ##  Concept 2: Spatial Distance
 I decided on a canvas UI to amplify the feeling of unfettered exploration. I wondered though how we could represent the number of steps along a dimension. It seemed natural to use distance from the origin to represent this so the further the user pulls from the original image the more intermediate nodes will be generated. The number of generations is shown by dots on the line.
 
-![image](/assets/creative_exploration/spatial.gif)
+![image](/assets/spatial.gif)
 
 ## Concept 3: Parallel Application
 It felt quite natural to then take this idea of graded variations and want to apply that to multiple base images simultaneously. In practice, you can imagine wanting to apply a ‘style’ to multiple inputs. 
 
-![image](/assets/creative_exploration/parallel.gif)
+![image](/assets/parallel.gif)
 
 I have to admit that the above example came out too well as each base image was prompted independently. 
 
@@ -39,11 +39,11 @@ The last idea I wanted to test was automatic interpolation between two images i.
 
 I initially tackled this using image-to-image video generation model and extracting intermediate frames. The challenge here was choosing which frames to extract so that the visual isn’t an awkward transition moment as in the case below.
 
-![image](/assets/creative_exploration/video_interpolation.gif)
+![image](/assets/video_interpolation.gif)
 
 I didn’t solve that problem directly and instead decided to switch back to image generation prompting the LLM to take the scene descriptions from the start and end nodes, identifying a dimension of change, categorising as continuous or discrete, and then generating suitable image prompts following that. Below were the results from that experiment.
 
-![image](/assets/creative_exploration/image_to_image_interpolation.gif)
+![image](/assets/image_to_image_interpolation.gif)
 
 The results are far from usable and I didn’t spend long on fine-tuning my prompt. So hopefully, with more time experimenting something more reasonable could be attainable! 
 
